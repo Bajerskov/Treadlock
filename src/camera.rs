@@ -84,10 +84,13 @@ impl Camera {
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
         let view = Mat4::look_at_rh(self.pos, self.target, self.up);
-        let mut proj = Mat4::perspective_rh(self.fov, aspect, 0.25, 4000.0);
-        // Vulkan's clip space has +Y pointing down, unlike OpenGL's.
-        proj.y_axis.y *= -1.0;
-        proj * view
+        // In this pipeline clip y = +1 is the top of the window, which the HUD
+        // pins independently: ui::pixel_to_ndc sends pixel row 0 there and it
+        // lands at the top. glam's perspective already sends view-space up to
+        // +y, so it needs no correction. Negating it here, as the usual Vulkan
+        // advice suggests, rendered the entire world upside down - which is
+        // easy to miss, because a mirrored tube still looks like a tube.
+        Mat4::perspective_rh(self.fov, aspect, 0.25, 4000.0) * view
     }
 }
 
@@ -96,6 +99,56 @@ mod tests {
     use super::*;
     use crate::sim::{Sim, TICK_DT};
     use crate::vehicle::autopilot;
+
+    /// Something physically above the camera must appear above the middle of
+    /// the screen. Getting this backwards flips the world without making it
+    /// look broken - a mirrored tube is still a tube - and shows up instead as
+    /// a car that seems to drive on the ceiling and never falls.
+    ///
+    /// The reference is the HUD: `ui::pixel_to_ndc` puts pixel row 0 at clip
+    /// y = +1, and that is confirmed to render at the top of the window. So
+    /// clip y = +1 is up here too.
+    #[test]
+    fn world_up_projects_to_the_top_of_the_screen() {
+        let camera = Camera {
+            pos: Vec3::ZERO,
+            target: Vec3::NEG_Z * 10.0,
+            up: Vec3::Y,
+            fov: 70f32.to_radians(),
+        };
+        let view_proj = camera.view_proj(16.0 / 9.0);
+
+        let project = |p: Vec3| {
+            let clip = view_proj * p.extend(1.0);
+            clip.y / clip.w
+        };
+        let above = project(Vec3::new(0.0, 3.0, -20.0));
+        let below = project(Vec3::new(0.0, -3.0, -20.0));
+
+        assert!(above > 0.0, "a point above the camera projected below centre");
+        assert!(below < 0.0, "a point below the camera projected above centre");
+        assert!(above > below, "vertical axis is inverted");
+
+        // And the same for the tube interior direction the camera rides on: the
+        // surface under the car must land below the middle of the view.
+        let mut sim = Sim::new(7);
+        sim.tick(&crate::vehicle::Controls::default(), TICK_DT);
+        let mut chase = Camera::new(&sim.player);
+        chase.snap(&sim.player, &sim.track);
+        let surf = sim.track.surface(sim.player.pos, sim.player.hint);
+
+        let vp = chase.view_proj(16.0 / 9.0);
+        let ground = sim.player.pos + surf.down * 4.0;
+        let sky = sim.player.pos - surf.down * 4.0;
+        let clip_y = |p: Vec3| {
+            let c = vp * p.extend(1.0);
+            c.y / c.w
+        };
+        assert!(
+            clip_y(ground) < clip_y(sky),
+            "the track surface projected above the tube interior, so the world is upside down"
+        );
+    }
 
     /// The camera is anchored to the tube interior, so it must never end up
     /// outside the wall, which renders the level inside out.
