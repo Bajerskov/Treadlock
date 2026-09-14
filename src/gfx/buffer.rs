@@ -8,6 +8,7 @@ use super::context::Context;
 
 pub struct Buffer {
     pub handle: vk::Buffer,
+    pub size: vk::DeviceSize,
     allocation: Option<Allocation>,
 }
 
@@ -46,7 +47,7 @@ impl Buffer {
             ctx.device
                 .bind_buffer_memory(handle, allocation.memory(), allocation.offset())
                 .unwrap();
-            Buffer { handle, allocation: Some(allocation) }
+            Buffer { handle, size, allocation: Some(allocation) }
         }
     }
 

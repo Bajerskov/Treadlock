@@ -14,6 +14,16 @@ pub const OPPONENT_COUNT: usize = 5;
 /// Cars closer than this push each other apart.
 const CONTACT_RADIUS: f32 = 3.4;
 
+/// One row of the running order.
+#[derive(Clone, Copy)]
+pub struct Standing {
+    pub is_player: bool,
+    pub progress: f32,
+    #[allow(dead_code)] // shown once lap-based standings replace gap-in-metres
+    pub lap: u32,
+    pub tint: glam::Vec3,
+}
+
 pub struct Opponent {
     pub car: Vehicle,
     /// Sideways offset this driver holds from the centre line, in metres, so
@@ -329,6 +339,31 @@ impl Sim {
                 }
             }
         }
+    }
+
+    /// When the current lap began, for the running lap timer.
+    pub fn lap_started(&self) -> f32 {
+        self.lap_start
+    }
+
+    /// The running order, leader first.
+    pub fn standings(&self) -> Vec<Standing> {
+        let mut order: Vec<Standing> = std::iter::once(Standing {
+            is_player: true,
+            progress: self.progress,
+            lap: self.lap,
+            tint: glam::Vec3::new(0.85, 0.16, 0.10),
+        })
+        .chain(self.opponents.iter().map(|o| Standing {
+            is_player: false,
+            progress: o.progress,
+            lap: o.lap,
+            tint: o.tint,
+        }))
+        .collect();
+        // Descending, so index 0 is the leader.
+        order.sort_by(|a, b| b.progress.total_cmp(&a.progress));
+        order
     }
 
     /// Where the player sits in the race, 1 for the lead. Ranked on unwrapped

@@ -12,6 +12,7 @@ use super::texture::Texture;
 use crate::mesh::Mesh;
 use crate::particles::{ParticleVertex, Particles, MAX_PARTICLES};
 use crate::track::Vertex;
+use crate::ui::UiVertex;
 
 /// Frames recorded ahead of the GPU. Two keeps latency low, which matters more
 /// than throughput for a twitchy racer.
@@ -66,7 +67,8 @@ struct Frame {
     in_flight: vk::Fence,
     uniform: Buffer,
     descriptor_set: vk::DescriptorSet,
-    /// Rebuilt every frame from the live particles, so it is host visible.
+    /// Rebuilt every frame, so both are host visible.
+    ui_vertices: Buffer,
     particle_vertices: Buffer,
 }
 
@@ -93,6 +95,7 @@ pub struct Renderer {
     pub texture_pool: vk::DescriptorPool,
     white: Option<Texture>,
     particle_pipeline: vk::Pipeline,
+    ui_pipeline: vk::Pipeline,
     /// Quad indices for the whole pool, uploaded once and reused.
     particle_indices: Buffer,
     frames: Vec<Frame>,
@@ -241,8 +244,19 @@ impl Renderer {
                     MemoryLocation::CpuToGpu,
                 );
 
+                // Generous: the HUD is a few hundred quads, the minimap most of
+                // them, and overrunning would silently truncate the overlay.
+                let ui_vertices = Buffer::new(
+                    ctx,
+                    "ui vertices",
+                    (12_000 * std::mem::size_of::<UiVertex>()) as vk::DeviceSize,
+                    vk::BufferUsageFlags::VERTEX_BUFFER,
+                    MemoryLocation::CpuToGpu,
+                );
+
                 frames.push(Frame {
                     command_buffer: command_buffers[i],
+                    ui_vertices,
                     particle_vertices,
                     image_available: ctx
                         .device
@@ -278,6 +292,7 @@ impl Renderer {
                 texture_pool,
                 white: Some(white),
                 particle_pipeline: build_particle_pipeline(ctx, swapchain, pipeline_layout),
+                ui_pipeline: build_ui_pipeline(ctx, swapchain, pipeline_layout),
                 particle_indices,
                 pipeline_layout,
                 pipeline,
@@ -299,6 +314,8 @@ impl Renderer {
         time: f32,
         draws: &[Draw],
         particle_vertices: &[ParticleVertex],
+        ui_vertices: &[UiVertex],
+        font: Option<&Texture>,
     ) {
         unsafe {
             let frame = &mut self.frames[self.frame_index];
@@ -485,6 +502,49 @@ impl Renderer {
                 ctx.device.cmd_draw_indexed(cmd, quads as u32 * 6, 1, 0, 0, 0);
             }
 
+            // HUD last of all, over the finished frame.
+            if !ui_vertices.is_empty() {
+                let capacity =
+                    (frame.ui_vertices.size as usize) / std::mem::size_of::<UiVertex>();
+                let count = ui_vertices.len().min(capacity);
+                frame
+                    .ui_vertices
+                    .write(bytemuck::cast_slice(&ui_vertices[..count]));
+
+                ctx.device
+                    .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.ui_pipeline);
+                let push = Push {
+                    model: Mat4::IDENTITY,
+                    tint: Vec4::ONE,
+                    // The UI shader turns pixels into clip space with this.
+                    params: Vec4::new(
+                        swapchain.extent.width as f32,
+                        swapchain.extent.height as f32,
+                        0.0,
+                        0.0,
+                    ),
+                };
+                ctx.device.cmd_push_constants(
+                    cmd,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    bytemuck::bytes_of(&push),
+                );
+                let atlas = font.or(self.white.as_ref()).expect("white fallback");
+                ctx.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline_layout,
+                    1,
+                    &[atlas.descriptor_set],
+                    &[],
+                );
+                ctx.device
+                    .cmd_bind_vertex_buffers(cmd, 0, &[frame.ui_vertices.handle], &[0]);
+                ctx.device.cmd_draw(cmd, count as u32, 1, 0, 0);
+            }
+
             ctx.device.cmd_end_rendering(cmd);
             transition(
                 ctx,
@@ -539,6 +599,8 @@ impl Renderer {
             ctx.device.destroy_pipeline(self.pipeline, None);
             ctx.device.destroy_pipeline(self.particle_pipeline, None);
             self.pipeline = build_pipeline(ctx, swapchain, self.pipeline_layout);
+            ctx.device.destroy_pipeline(self.ui_pipeline, None);
+            self.ui_pipeline = build_ui_pipeline(ctx, swapchain, self.pipeline_layout);
             self.particle_pipeline =
                 build_particle_pipeline(ctx, swapchain, self.pipeline_layout);
         }
@@ -553,6 +615,7 @@ impl Renderer {
                 ctx.device.destroy_fence(frame.in_flight, None);
                 frame.uniform.destroy(ctx);
                 frame.particle_vertices.destroy(ctx);
+                frame.ui_vertices.destroy(ctx);
             }
             self.frames.clear();
             if let Some(mut white) = self.white.take() {
@@ -670,6 +733,107 @@ unsafe fn build_pipeline(
         .device
         .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
         .expect("create graphics pipeline")[0];
+    ctx.device.destroy_shader_module(module, None);
+    pipeline
+}
+
+/// The UI draws last, in screen space: alpha blended over the finished frame,
+/// with depth entirely out of the way.
+unsafe fn build_ui_pipeline(
+    ctx: &Context,
+    swapchain: &Swapchain,
+    layout: vk::PipelineLayout,
+) -> vk::Pipeline {
+    let spirv = shader::compile(include_str!("../shaders/ui.wgsl"));
+    let module = shader::module(ctx, &spirv);
+    let vs_name = c"vs_main";
+    let fs_name = c"fs_main";
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(vs_name),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(module)
+            .name(fs_name),
+    ];
+
+    let bindings = [vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(std::mem::size_of::<UiVertex>() as u32)
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let attributes = [
+        vk::VertexInputAttributeDescription::default()
+            .location(0)
+            .binding(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(0),
+        vk::VertexInputAttributeDescription::default()
+            .location(1)
+            .binding(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(8),
+        vk::VertexInputAttributeDescription::default()
+            .location(2)
+            .binding(0)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .offset(16),
+    ];
+
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&bindings)
+        .vertex_attribute_descriptions(&attributes);
+    let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let raster = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let depth = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(false)
+        .depth_write_enable(false);
+    let blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(vk::BlendOp::ADD)];
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let color_formats = [swapchain.format];
+    let mut rendering = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&color_formats)
+        .depth_attachment_format(DEPTH_FORMAT);
+
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&assembly)
+        .viewport_state(&viewport)
+        .rasterization_state(&raster)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering);
+
+    let pipeline = ctx
+        .device
+        .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+        .expect("create ui pipeline")[0];
     ctx.device.destroy_shader_module(module, None);
     pipeline
 }

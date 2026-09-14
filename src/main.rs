@@ -7,6 +7,7 @@ mod model;
 mod particles;
 mod sim;
 mod track;
+mod ui;
 mod vehicle;
 
 use std::time::Instant;
@@ -92,6 +93,7 @@ fn main() {
         for (name, source) in [
             ("forward.wgsl", include_str!("shaders/forward.wgsl")),
             ("particles.wgsl", include_str!("shaders/particles.wgsl")),
+            ("ui.wgsl", include_str!("shaders/ui.wgsl")),
         ] {
             let spirv = gfx::shader::compile(source);
             println!("{name} compiled: {} words of SPIR-V", spirv.len());
@@ -204,6 +206,18 @@ fn run(args: Args) {
         )
     });
 
+    // The HUD font is rasterised from a table in code, so there is no asset to
+    // load. Nearest filtering keeps the pixels crisp at any scale.
+    let mut font_texture = gfx::texture::Texture::new_pixel_art(
+        &mut ctx,
+        renderer.texture_layout,
+        renderer.texture_pool,
+        ui::ATLAS_WIDTH,
+        ui::ATLAS_HEIGHT,
+        &ui::build_atlas(),
+    );
+    let mut hud = ui::Ui::default();
+
     let mut particles = particles::Particles::new();
     let mut camera = Camera::new(&sim.player);
     camera.snap(&sim.player, &sim.track);
@@ -299,6 +313,13 @@ fn run(args: Args) {
                         car_texture.as_ref(),
                         show_wheels,
                     );
+                    ui::build_hud(
+                        &mut hud,
+                        &sim,
+                        swapchain.extent.width as f32,
+                        swapchain.extent.height as f32,
+                    );
+
                     renderer.draw(
                         &mut ctx,
                         &swapchain,
@@ -307,6 +328,8 @@ fn run(args: Args) {
                         sim.time,
                         &draws,
                         &particle_vertices,
+                        &hud.vertices,
+                        Some(&font_texture),
                     );
 
                     frames += 1;
@@ -334,6 +357,7 @@ fn run(args: Args) {
                     renderer.destroy(&mut ctx);
                     track_mesh.destroy(&mut ctx);
                     pad_mesh.destroy(&mut ctx);
+                    font_texture.destroy(&mut ctx);
                     if let Some(texture) = car_texture.as_mut() {
                         texture.destroy(&mut ctx);
                     }

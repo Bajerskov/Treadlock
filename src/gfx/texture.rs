@@ -29,7 +29,21 @@ impl Texture {
         height: u32,
         rgba: &[u8],
     ) -> Texture {
-        unsafe { Self::create(ctx, layout, pool, width, height, rgba) }
+        unsafe { Self::create(ctx, layout, pool, width, height, rgba, true) }
+    }
+
+    /// Nearest filtering and a single mip level, for the bitmap font atlas.
+    /// Smoothing a pixel font turns it to mush, and mips would blend glyphs
+    /// into their neighbours.
+    pub fn new_pixel_art(
+        ctx: &mut Context,
+        layout: vk::DescriptorSetLayout,
+        pool: vk::DescriptorPool,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Texture {
+        unsafe { Self::create(ctx, layout, pool, width, height, rgba, false) }
     }
 
     /// A single white pixel, bound wherever a draw has no texture of its own, so
@@ -49,8 +63,14 @@ impl Texture {
         width: u32,
         height: u32,
         rgba: &[u8],
+        smooth: bool,
     ) -> Texture {
-        let mip_levels = (width.max(height) as f32).log2().floor() as u32 + 1;
+        let mip_levels = if smooth {
+            (width.max(height) as f32).log2().floor() as u32 + 1
+        } else {
+            1
+        };
+        let filter = if smooth { vk::Filter::LINEAR } else { vk::Filter::NEAREST };
 
         let image = ctx
             .device
@@ -143,16 +163,18 @@ impl Texture {
             .device
             .create_sampler(
                 &vk::SamplerCreateInfo::default()
-                    .mag_filter(vk::Filter::LINEAR)
-                    .min_filter(vk::Filter::LINEAR)
+                    .mag_filter(filter)
+                    .min_filter(filter)
                     .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                    .address_mode_u(vk::SamplerAddressMode::REPEAT)
-                    .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                    // Clamp for the atlas, so a glyph at the edge cannot wrap
+                    // round and pick up the opposite side.
+                    .address_mode_u(if smooth { vk::SamplerAddressMode::REPEAT } else { vk::SamplerAddressMode::CLAMP_TO_EDGE })
+                    .address_mode_v(if smooth { vk::SamplerAddressMode::REPEAT } else { vk::SamplerAddressMode::CLAMP_TO_EDGE })
                     .address_mode_w(vk::SamplerAddressMode::REPEAT)
                     .max_lod(mip_levels as f32)
                     // Anisotropy is what keeps a road surface readable at a
                     // glancing angle, which is the whole view in a racer.
-                    .anisotropy_enable(true)
+                    .anisotropy_enable(smooth)
                     .max_anisotropy(8.0),
                 None,
             )
