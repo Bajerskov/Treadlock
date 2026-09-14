@@ -76,6 +76,7 @@ fn parse_args() -> Args {
         car_fit: model::Fit {
             yaw_degrees: arg_value(&argv, "--car-yaw").unwrap_or(0.0),
             pitch_degrees: arg_value(&argv, "--car-pitch").unwrap_or(0.0),
+            roll_degrees: arg_value(&argv, "--car-roll").unwrap_or(0.0),
             scale: arg_value(&argv, "--car-scale").unwrap_or(1.0),
         },
     }
@@ -181,8 +182,26 @@ fn run(args: Args) {
     };
 
     let mut camera = Camera::new(&sim.player);
+    camera.snap(&sim.player, &sim.track);
     let mut input = input::Input::new();
     println!("gamepads: {}", input.gamepad_count());
+
+    // Orientation at the start line, so a report of "it looks upside down" can
+    // be pinned on the engine or on the model rather than guessed at. All three
+    // near +1.00 means the engine is upright and any remaining flip is baked
+    // into the model's own geometry.
+    {
+        let surf = sim.track.surface(sim.player.pos, sim.player.hint);
+        let interior = -surf.down;
+        println!(
+            "spawn check: car roof . tube interior {:+.2} | camera up . tube interior {:+.2} \
+             | camera inside wall by {:.1} m | car facing along track {:+.2}",
+            sim.player.up().dot(interior),
+            camera.up.dot(interior),
+            sim.track.surface(camera.pos, sim.player.hint).gap,
+            sim.player.forward().dot(surf.tangent),
+        );
+    }
 
     let mut last = Instant::now();
     let mut fps_timer = Instant::now();

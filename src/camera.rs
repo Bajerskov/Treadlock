@@ -83,3 +83,40 @@ impl Camera {
         proj * view
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::{Sim, TICK_DT};
+    use crate::vehicle::autopilot;
+
+    /// The camera is anchored to the tube interior, so it must never end up
+    /// outside the wall, which renders the level inside out.
+    #[test]
+    fn camera_stays_inside_the_tube() {
+        for seed in [1u64, 7, 42] {
+            let mut sim = Sim::new(seed);
+            let mut camera = Camera::new(&sim.player);
+            let mut worst = f32::MAX;
+            let mut worst_up = 1.0f32;
+
+            for _ in 0..(45.0 / TICK_DT) as usize {
+                let controls = autopilot(&sim.track, &sim.player, 26.0);
+                sim.tick(&controls, TICK_DT);
+                camera.follow(&sim.player, &sim.track, TICK_DT);
+
+                let surf = sim.track.surface(camera.pos, sim.player.hint);
+                worst = worst.min(surf.gap);
+                // The camera's up should agree with the tube interior, or the
+                // horizon rolls over and the world looks upside down.
+                let car = sim.track.surface(sim.player.pos, sim.player.hint);
+                worst_up = worst_up.min(camera.up.dot(-car.down));
+            }
+            assert!(worst > 0.0, "seed {seed}: camera left the tube, worst gap {worst:.2} m");
+            assert!(
+                worst_up > 0.0,
+                "seed {seed}: camera up inverted against the tube, worst {worst_up:.2}"
+            );
+        }
+    }
+}
