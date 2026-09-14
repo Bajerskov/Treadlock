@@ -27,8 +27,8 @@ struct Args {
     vsync: bool,
     /// Path to a .glb or .gltf car model. Falls back to the procedural box.
     car: Option<String>,
-    /// Extra yaw in degrees, for a model the automatic fit turns the wrong way.
-    car_yaw: f32,
+    /// Orientation and scale corrections for that model.
+    car_fit: model::Fit,
 }
 
 fn arg_value<T: std::str::FromStr>(argv: &[String], flag: &str) -> Option<T> {
@@ -49,7 +49,11 @@ fn parse_args() -> Args {
         trace: argv.iter().any(|a| a == "--trace"),
         vsync: !argv.iter().any(|a| a == "--no-vsync"),
         car: arg_value(&argv, "--car"),
-        car_yaw: arg_value(&argv, "--car-yaw").unwrap_or(0.0),
+        car_fit: model::Fit {
+            yaw_degrees: arg_value(&argv, "--car-yaw").unwrap_or(0.0),
+            pitch_degrees: arg_value(&argv, "--car-pitch").unwrap_or(0.0),
+            scale: arg_value(&argv, "--car-scale").unwrap_or(1.0),
+        },
     }
 }
 
@@ -69,7 +73,7 @@ fn main() {
             eprintln!("--check-model needs --car <path to .glb>");
             std::process::exit(2);
         };
-        match model::Model::load(path, args.car_yaw) {
+        match model::Model::load(path, args.car_fit) {
             Ok(m) => {
                 let tris = m.chassis.indices.len() / 3;
                 if tris > 40_000 {
@@ -130,7 +134,7 @@ fn run(args: Args) {
     // A loaded model replaces the procedural body. If it has no separately
     // named wheel node its wheels are already modelled into the body, so drawing
     // the engine's own wheels on top would double them up.
-    let loaded = args.car.as_ref().and_then(|path| match model::Model::load(path, args.car_yaw) {
+    let loaded = args.car.as_ref().and_then(|path| match model::Model::load(path, args.car_fit) {
         Ok(m) => Some(m),
         Err(e) => {
             eprintln!("{e}\nfalling back to the procedural car");

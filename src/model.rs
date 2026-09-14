@@ -12,6 +12,27 @@ use crate::track::Vertex;
 
 /// Target length of the car in metres, matching the physics chassis.
 const TARGET_LENGTH: f32 = 4.2;
+/// Widest the car may render, roughly the physics chassis plus its wheels.
+/// Fitting on length alone lets a stocky model spill well outside the body that
+/// is actually colliding, so whichever axis binds first wins.
+const TARGET_WIDTH: f32 = 2.5;
+
+/// How to orient and size a model that was not authored for this game.
+#[derive(Clone, Copy)]
+pub struct Fit {
+    /// Extra yaw, on top of the automatic sideways correction.
+    pub yaw_degrees: f32,
+    /// Extra pitch. Use -90 for a Z-up model, which Blender exports produce.
+    pub pitch_degrees: f32,
+    /// Multiplier on the automatic fit, for taste.
+    pub scale: f32,
+}
+
+impl Default for Fit {
+    fn default() -> Fit {
+        Fit { yaw_degrees: 0.0, pitch_degrees: 0.0, scale: 1.0 }
+    }
+}
 
 pub struct Model {
     pub chassis: Mesh,
@@ -46,7 +67,7 @@ impl Bounds {
 impl Model {
     /// Load a .glb or .gltf file, refit it to the physics chassis, and split out
     /// a wheel mesh if the file names one.
-    pub fn load(path: &str, extra_yaw_degrees: f32) -> Result<Model, String> {
+    pub fn load(path: &str, fit: Fit) -> Result<Model, String> {
         let (document, buffers, _images) =
             gltf::import(path).map_err(|e| format!("failed to read {path}: {e}"))?;
 
@@ -66,36 +87,63 @@ impl Model {
             return Err(format!("{path} contains no geometry"));
         }
 
-        // Fit against the body alone. Including wheels would shrink the body to
-        // compensate for tyres sticking out past it.
-        let bounds = bounds_of(&chassis);
+        // Measure the body alone throughout. Including wheels would shrink the
+        // body to compensate for tyres standing proud of it.
+        let source = bounds_of(&chassis).size();
+
+        // Caller-supplied correction first, since it decides which axis is which
+        // before anything is measured for the automatic pass.
+        let mut parts: Vec<&mut Mesh> =
+            std::iter::once(&mut chassis).chain(wheel.as_mut()).collect();
+        let manual = Mat4::from_rotation_y(fit.yaw_degrees.to_radians())
+            * Mat4::from_rotation_x(fit.pitch_degrees.to_radians());
+        for part in parts.iter_mut() {
+            apply(part, manual);
+        }
+
+        // glTF is Y-up with -Z forward, same as the engine, but a generated model
+        // often still faces sideways. That shows up as the wider horizontal axis
+        // being X rather than Z.
+        let oriented = bounds_of(parts[0]).size();
+        let auto_yaw = if oriented.x > oriented.z { 90.0f32 } else { 0.0 };
+        if auto_yaw != 0.0 {
+            let turn = Mat4::from_rotation_y(auto_yaw.to_radians());
+            for part in parts.iter_mut() {
+                apply(part, turn);
+            }
+        }
+
+        let bounds = bounds_of(parts[0]);
         let size = bounds.size();
+        let by_length = TARGET_LENGTH / size.z.max(1e-3);
+        let by_width = TARGET_WIDTH / size.x.max(1e-3);
+        let limit = if by_width < by_length { "width" } else { "length" };
+        let scale = by_length.min(by_width) * fit.scale;
 
-        // glTF is Y-up with -Z forward, same as the engine. A generated model may
-        // still come out facing sideways, which shows up as the widest horizontal
-        // axis being X rather than Z.
-        let auto_yaw = if size.x > size.z { 90.0 } else { 0.0 };
-        let yaw = (auto_yaw + extra_yaw_degrees).to_radians();
-
-        let length = size.x.max(size.z).max(1e-3);
-        let scale = TARGET_LENGTH / length;
-        let transform =
-            Mat4::from_rotation_y(yaw) * Mat4::from_scale(Vec3::splat(scale)) * Mat4::from_translation(-bounds.center());
-
-        apply(&mut chassis, transform);
-        if let Some(w) = wheel.as_mut() {
-            apply(w, transform);
+        let transform = Mat4::from_scale(Vec3::splat(scale)) * Mat4::from_translation(-bounds.center());
+        for part in parts.iter_mut() {
+            apply(part, transform);
         }
 
         let fitted = bounds_of(&chassis).size();
         println!(
-            "model {path}: {} tris, source {:.2}x{:.2}x{:.2} m, scaled {:.3}x to {:.2}x{:.2}x{:.2} m{}",
+            "model {path}: {} tris, source {:.2}x{:.2}x{:.2} m -> {:.2}x{:.2}x{:.2} m \
+             (scale {:.3}x, limited by {limit}{}){}",
             chassis.indices.len() / 3,
-            size.x, size.y, size.z,
-            scale,
+            source.x, source.y, source.z,
             fitted.x, fitted.y, fitted.z,
+            scale,
+            if auto_yaw != 0.0 { ", auto-yawed 90 deg" } else { "" },
             if wheel.is_some() { ", separate wheel mesh" } else { ", wheels fused into body" },
         );
+        if fitted.z < TARGET_LENGTH * 0.85 {
+            println!(
+                "  note: this model is stocky for a car, so matching the {TARGET_WIDTH:.1} m width \
+                 budget leaves it {:.2} m long against a {TARGET_LENGTH:.1} m chassis. \
+                 Pass --car-scale to override.",
+                fitted.z
+            );
+        }
 
         Ok(Model { chassis, wheel })
     }
@@ -238,8 +286,9 @@ mod tests {
 
     /// Write a minimal glTF 2.0 file with an external buffer: one triangle
     /// spanning 2 x 0.5 x 4 metres, so refitting has something to measure.
-    fn write_fixture(dir: &std::path::Path, name: &str) -> String {
-        let positions: [f32; 9] = [-1.0, 0.0, -2.0, 1.0, 0.0, -2.0, 0.0, 0.5, 2.0];
+    fn write_fixture(dir: &std::path::Path, name: &str, extents: Vec3) -> String {
+        let (hx, hz) = (extents.x * 0.5, extents.z * 0.5);
+        let positions: [f32; 9] = [-hx, 0.0, -hz, hx, 0.0, -hz, 0.0, extents.y, hz];
         let indices: [u16; 3] = [0, 1, 2];
 
         let mut bin = Vec::new();
@@ -260,7 +309,7 @@ mod tests {
 "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0}}, "indices": 1}}]}}],
 "accessors": [
   {{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
-    "min": [-1.0, 0.0, -2.0], "max": [1.0, 0.5, 2.0]}},
+    "min": [{:?}, 0.0, {:?}], "max": [{:?}, {:?}, {:?}]}},
   {{"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}}
 ],
 "bufferViews": [
@@ -269,7 +318,7 @@ mod tests {
 ],
 "buffers": [{{"uri": "fixture.bin", "byteLength": {}}}]
 }}"#,
-            bin.len()
+            -hx, -hz, hx, extents.y, hz, bin.len()
         );
         let path = dir.join("fixture.gltf");
         let mut file = std::fs::File::create(&path).unwrap();
@@ -286,8 +335,8 @@ mod tests {
     #[test]
     fn refits_model_to_the_physics_chassis() {
         let dir = temp_dir("refit");
-        let path = write_fixture(&dir, "Car");
-        let model = Model::load(&path, 0.0).expect("load");
+        let path = write_fixture(&dir, "Car", Vec3::new(2.0, 0.5, 4.0));
+        let model = Model::load(&path, Fit::default()).expect("load");
 
         let size = bounds_of(&model.chassis).size();
         // Longest horizontal axis is scaled to the target car length.
@@ -307,11 +356,44 @@ mod tests {
         assert!(Vec3::from(model.chassis.vertices[0].normal).length() > 0.9);
     }
 
+    /// A stocky model - wide relative to its length, which is what a generated
+    /// car with big exposed wheels looks like - must not be scaled until it
+    /// overhangs the body that is actually colliding.
+    #[test]
+    fn stocky_model_is_limited_by_width_not_length() {
+        let dir = temp_dir("stocky");
+        // Facing along X, as generators often produce.
+        let path = write_fixture(&dir, "Car", Vec3::new(1.90, 0.53, 1.37));
+        let model = Model::load(&path, Fit::default()).expect("load");
+
+        let size = bounds_of(&model.chassis).size();
+        assert!(
+            size.x <= TARGET_WIDTH + 1e-3,
+            "fitted width {} exceeds the {TARGET_WIDTH} m budget",
+            size.x
+        );
+        // The auto-yaw should have turned its long axis down the track.
+        assert!(size.z > size.x, "long axis was not turned to face forward");
+        assert!(size.z <= TARGET_LENGTH + 1e-3);
+    }
+
+    #[test]
+    fn scale_override_multiplies_the_automatic_fit() {
+        let dir = temp_dir("scaled");
+        let path = write_fixture(&dir, "Car", Vec3::new(2.0, 0.5, 4.0));
+        let base = Model::load(&path, Fit::default()).expect("load");
+        let bigger = Model::load(&path, Fit { scale: 2.0, ..Fit::default() }).expect("load");
+
+        let a = bounds_of(&base.chassis).size();
+        let b = bounds_of(&bigger.chassis).size();
+        assert!((b.z - a.z * 2.0).abs() < 1e-3, "scale override did not apply");
+    }
+
     #[test]
     fn separates_a_named_wheel_node() {
         let dir = temp_dir("wheel");
-        let path = write_fixture(&dir, "Wheel_FL");
-        let model = Model::load(&path, 0.0);
+        let path = write_fixture(&dir, "Wheel_FL", Vec3::new(2.0, 0.5, 4.0));
+        let model = Model::load(&path, Fit::default());
         // The only geometry is a wheel, so there is no body to fit against.
         assert!(model.is_err(), "a wheel-only file should not load as a car");
     }

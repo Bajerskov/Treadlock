@@ -68,11 +68,21 @@ Pass a `.glb` or `.gltf` file with `--car`. Models are refitted on load rather
 than having to arrive correct, because generated models (Meshy, Tripo and
 similar) come out at arbitrary scale and facing:
 
-- scaled so the longest horizontal axis is 4.2 m, the physics chassis length
+- yawed 90 degrees automatically when the model is wider than it is long, since
+  generated cars often face along X
+- scaled uniformly to the first limit it hits, either 4.2 m long or 2.5 m wide.
+  Fitting on length alone lets a stocky model overhang the body that is actually
+  colliding, which reads as wheels floating outside the car
 - recentred on the origin, where the physics body sits
-- yawed 90 degrees automatically when the model is wider than it is long, with
-  `--car-yaw <degrees>` to correct anything the guess gets wrong
 - normals generated when the file has none
+
+Corrections, when a guess goes wrong:
+
+| Flag | Use |
+| --- | --- |
+| `--car-yaw <deg>` | Model faces the wrong way round the vertical axis |
+| `--car-pitch <deg>` | Model is Z-up; pass `-90`. Blender exports do this |
+| `--car-scale <x>` | Multiplier on the automatic fit, for taste |
 
 If any node is named with `wheel`, `tyre` or `tire` it becomes the wheel mesh,
 drawn four times with spin and steering applied. Otherwise the model is assumed
