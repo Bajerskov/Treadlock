@@ -1,36 +1,252 @@
+mod camera;
+mod gfx;
+mod input;
+mod mesh;
 mod sim;
 mod track;
 mod vehicle;
 
+use std::time::Instant;
+
+use glam::{Mat4, Quat, Vec3};
+use winit::event::{ElementState, Event, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
+
+use camera::Camera;
+use gfx::context::Context;
+use gfx::renderer::{Draw, GpuMesh, Renderer};
+use gfx::swapchain::Swapchain;
 use sim::{Sim, TICK_DT};
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let seed = args
-        .iter()
-        .position(|a| a == "--seed")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(7u64);
+struct Args {
+    seed: u64,
+    headless: Option<f32>,
+    trace: bool,
+    vsync: bool,
+}
 
-    if args.iter().any(|a| a == "--headless") {
-        let seconds = args
+fn arg_value<T: std::str::FromStr>(argv: &[String], flag: &str) -> Option<T> {
+    argv.iter()
+        .position(|a| a == flag)
+        .and_then(|i| argv.get(i + 1))
+        .and_then(|s| s.parse().ok())
+}
+
+fn parse_args() -> Args {
+    let argv: Vec<String> = std::env::args().collect();
+    Args {
+        seed: arg_value(&argv, "--seed").unwrap_or(7),
+        headless: argv
             .iter()
-            .position(|a| a == "--headless")
-            .and_then(|i| args.get(i + 1))
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(60.0f32);
-        headless(seed, seconds);
+            .any(|a| a == "--headless")
+            .then(|| arg_value(&argv, "--headless").unwrap_or(60.0)),
+        trace: argv.iter().any(|a| a == "--trace"),
+        vsync: !argv.iter().any(|a| a == "--no-vsync"),
+    }
+}
+
+fn main() {
+    let args = parse_args();
+    // Shader translation needs no GPU, so it can be checked on a build machine
+    // that has no Vulkan driver at all.
+    if std::env::args().any(|a| a == "--check-shaders") {
+        let spirv = gfx::shader::compile(include_str!("shaders/forward.wgsl"));
+        println!("forward.wgsl compiled: {} words of SPIR-V", spirv.len());
         return;
     }
+    match args.headless {
+        Some(seconds) => headless(args.seed, seconds, args.trace),
+        None => run(args),
+    }
+}
 
-    println!("treadlock: renderer not wired up yet; use --headless <seconds>");
+fn run(args: Args) {
+    let event_loop = EventLoop::new().expect("failed to create event loop");
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let window = winit::window::WindowBuilder::new()
+        .with_title("Treadlock")
+        .with_inner_size(winit::dpi::LogicalSize::new(1600, 900))
+        .build(&event_loop)
+        .expect("failed to create window");
+
+    let mut ctx = Context::new(&window);
+    println!(
+        "gpu: {} | ray query: {}",
+        ctx.device_name,
+        if ctx.ray_query { "yes" } else { "no (screen-space reflections only)" }
+    );
+
+    let size = window.inner_size();
+    let mut swapchain = Swapchain::new(&mut ctx, size.width, size.height, args.vsync);
+    let mut renderer = Renderer::new(&mut ctx, &swapchain);
+
+    let mut sim = Sim::new(args.seed);
+    println!(
+        "track: seed {} | {:.0} m | {} frames",
+        args.seed,
+        sim.track.length,
+        sim.track.frames.len()
+    );
+
+    let mut track_mesh = GpuMesh::upload(
+        &mut ctx,
+        "track",
+        &sim.track.vertices,
+        &sim.track.indices,
+    );
+    let mut chassis_mesh =
+        GpuMesh::from_mesh(&mut ctx, "chassis", &mesh::chassis(Vec3::new(1.15, 0.45, 2.1), 0.72));
+    let mut wheel_mesh = GpuMesh::from_mesh(&mut ctx, "wheel", &mesh::wheel(0.62, 0.22, 16));
+
+    let mut camera = Camera::new(&sim.player);
+    let mut input = input::Input::new();
+    println!("gamepads: {}", input.gamepad_count());
+
+    let mut last = Instant::now();
+    let mut fps_timer = Instant::now();
+    let mut frames = 0u32;
+    let mut destroyed = false;
+
+    event_loop
+        .run(move |event, target| match event {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => target.exit(),
+                WindowEvent::Resized(size) => {
+                    if size.width > 0 && size.height > 0 {
+                        swapchain.recreate(&mut ctx, size.width, size.height, args.vsync);
+                        renderer.rebuild_pipeline(&mut ctx, &swapchain);
+                        renderer.needs_resize = false;
+                    }
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    let pressed = event.state == ElementState::Pressed;
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        match code {
+                            KeyCode::Escape => target.exit(),
+                            KeyCode::KeyW | KeyCode::ArrowUp => input.keys.up = pressed,
+                            KeyCode::KeyS | KeyCode::ArrowDown => input.keys.down = pressed,
+                            KeyCode::KeyA | KeyCode::ArrowLeft => input.keys.left = pressed,
+                            KeyCode::KeyD | KeyCode::ArrowRight => input.keys.right = pressed,
+                            KeyCode::ShiftLeft => input.keys.boost = pressed,
+                            KeyCode::Space => input.keys.handbrake = pressed,
+                            KeyCode::KeyR if pressed => sim.player.respawn(&sim.track),
+                            _ => {}
+                        }
+                    }
+                }
+                WindowEvent::RedrawRequested => {
+                    let now = Instant::now();
+                    let dt = (now - last).as_secs_f32().min(0.1);
+                    last = now;
+
+                    input.poll();
+                    if input.take_respawn() {
+                        sim.player.respawn(&sim.track);
+                    }
+                    sim.update(&input.controls(), dt);
+                    camera.follow(&sim.player, dt);
+
+                    if renderer.needs_resize {
+                        let size = window.inner_size();
+                        if size.width > 0 && size.height > 0 {
+                            swapchain.recreate(&mut ctx, size.width, size.height, args.vsync);
+                            renderer.needs_resize = false;
+                        }
+                    }
+
+                    let aspect =
+                        swapchain.extent.width as f32 / swapchain.extent.height.max(1) as f32;
+                    let draws = build_draws(&sim, &track_mesh, &chassis_mesh, &wheel_mesh);
+                    renderer.draw(
+                        &mut ctx,
+                        &swapchain,
+                        camera.view_proj(aspect),
+                        camera.pos,
+                        sim.time,
+                        &draws,
+                    );
+
+                    frames += 1;
+                    if fps_timer.elapsed().as_secs_f32() >= 1.0 {
+                        let fps = frames as f32 / fps_timer.elapsed().as_secs_f32();
+                        window.set_title(&format!(
+                            "Treadlock - {:.0} fps - {:.0} km/h - lap {}",
+                            fps,
+                            sim.player.speed_kph(),
+                            sim.lap + 1
+                        ));
+                        frames = 0;
+                        fps_timer = Instant::now();
+                    }
+                }
+                _ => {}
+            },
+            Event::AboutToWait => window.request_redraw(),
+            Event::LoopExiting => {
+                // Tear down GPU resources while the device is still alive.
+                if !destroyed {
+                    destroyed = true;
+                    renderer.destroy(&mut ctx);
+                    track_mesh.destroy(&mut ctx);
+                    chassis_mesh.destroy(&mut ctx);
+                    wheel_mesh.destroy(&mut ctx);
+                    swapchain.destroy(&mut ctx);
+                }
+            }
+            _ => {}
+        })
+        .expect("event loop failed");
+}
+
+fn build_draws<'a>(
+    sim: &Sim,
+    track_mesh: &'a GpuMesh,
+    chassis_mesh: &'a GpuMesh,
+    wheel_mesh: &'a GpuMesh,
+) -> Vec<Draw<'a>> {
+    let mut draws = vec![Draw {
+        mesh: track_mesh,
+        model: Mat4::IDENTITY,
+        tint: Vec3::new(0.30, 0.33, 0.40),
+        surface: 1.0,
+        emissive: 0.0,
+        metallic: 0.35,
+    }];
+
+    let car = &sim.player;
+    let body = Mat4::from_rotation_translation(car.rot, car.pos);
+    let boosting = car.boost < 0.999;
+    draws.push(Draw {
+        mesh: chassis_mesh,
+        model: body,
+        tint: Vec3::new(0.85, 0.16, 0.10),
+        surface: 0.0,
+        emissive: if boosting { 0.6 } else { 0.0 },
+        metallic: 0.85,
+    });
+
+    for wheel in &car.wheels {
+        // Wheels are positioned by the physics contact solve, then spun about
+        // their axle for the visual.
+        let spin = Quat::from_rotation_x(wheel.spin_angle);
+        draws.push(Draw {
+            mesh: wheel_mesh,
+            model: Mat4::from_rotation_translation(car.rot * spin, wheel.world_pos),
+            tint: Vec3::new(0.09, 0.09, 0.11),
+            surface: 0.0,
+            emissive: 0.0,
+            metallic: 0.2,
+        });
+    }
+    draws
 }
 
 /// Drive the track on autopilot with no renderer, and report whether the car
 /// actually behaves. This is the only way to validate handling on a machine
 /// with no GPU.
-fn headless(seed: u64, seconds: f32) {
+fn headless(seed: u64, seconds: f32, trace: bool) {
     let mut sim = Sim::new(seed);
     println!(
         "track seed {} | {:.0} m | {} frames",
@@ -45,37 +261,9 @@ fn headless(seed: u64, seconds: f32) {
     let mut airborne_ticks = 0usize;
     let mut escaped = 0usize;
 
-    let trace = std::env::args().any(|a| a == "--trace");
-    let trace_every = sim::TICK_RATE as usize;
-
     for tick in 0..ticks {
         let controls = vehicle::autopilot(&sim.track, &sim.player, 26.0);
         sim.tick(&controls, TICK_DT);
-
-        let fine = tick < sim::TICK_RATE as usize * 3 && tick % 6 == 0;
-        if trace && (fine || tick % trace_every == 0) {
-            let surf = sim.track.surface(sim.player.pos, sim.player.hint);
-            let up_err = sim.player.up().dot(-surf.down);
-            println!(
-                "t={:5.1}s spd={:6.1}km/h gap={:6.2}m contacts={} idx={:4} dist={:7.1}m up.n={:+.2} angvel={:5.2}",
-                sim.time,
-                sim.player.speed_kph(),
-                surf.gap,
-                sim.player.contacts,
-                surf.index,
-                sim.player.distance,
-                up_err,
-                sim.player.ang_vel.length()
-            );
-            println!(
-                "        v.down={:+7.2} comp=[{:.2} {:.2} {:.2} {:.2}]",
-                sim.player.vel.dot(surf.down),
-                sim.player.wheels[0].compression,
-                sim.player.wheels[1].compression,
-                sim.player.wheels[2].compression,
-                sim.player.wheels[3].compression,
-            );
-        }
 
         let s = sim.player.speed();
         if !s.is_finite() || !sim.player.pos.is_finite() {
@@ -87,10 +275,22 @@ fn headless(seed: u64, seconds: f32) {
         if !sim.player.grounded {
             airborne_ticks += 1;
         }
-        // Outside the tube wall by more than a chassis is a containment failure.
         let surf = sim.track.surface(sim.player.pos, sim.player.hint);
+        // Outside the tube wall by more than a chassis is a containment failure.
         if surf.gap < -1.0 {
             escaped += 1;
+        }
+
+        if trace && tick % sim::TICK_RATE as usize == 0 {
+            println!(
+                "t={:5.1}s spd={:6.1}km/h gap={:6.2}m contacts={} dist={:7.1}m up.n={:+.2}",
+                sim.time,
+                sim.player.speed_kph(),
+                surf.gap,
+                sim.player.contacts,
+                sim.player.distance,
+                sim.player.up().dot(-surf.down),
+            );
         }
     }
 
@@ -107,5 +307,4 @@ fn headless(seed: u64, seconds: f32) {
     if sim.best_lap_time.is_finite() {
         println!("best lap {:.2}s", sim.best_lap_time);
     }
-    println!("distance along track {:.0} m", sim.player.distance);
 }

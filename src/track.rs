@@ -35,6 +35,7 @@ pub struct Frame {
 }
 
 /// The result of locating a world position relative to the tube surface.
+#[allow(dead_code)] // tangent and radius are the basis for the upcoming AI racing line
 pub struct Surface {
     /// Index of the nearest centerline frame; feed back as a hint next query.
     pub index: usize,

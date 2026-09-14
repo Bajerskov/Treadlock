@@ -51,12 +51,24 @@ pub struct Wheel {
     pub world_pos: Vec3,
     pub contact: bool,
     pub compression: f32,
+    /// Wheel angular velocity, rad/s.
     pub spin: f32,
+    /// Accumulated rotation, for drawing the wheel turning.
+    pub spin_angle: f32,
 }
 
 impl Wheel {
     fn new(offset: Vec3, steers: bool, powered: bool) -> Wheel {
-        Wheel { offset, steers, powered, world_pos: Vec3::ZERO, contact: false, compression: 0.0, spin: 0.0 }
+        Wheel {
+            offset,
+            steers,
+            powered,
+            world_pos: Vec3::ZERO,
+            contact: false,
+            compression: 0.0,
+            spin: 0.0,
+            spin_angle: 0.0,
+        }
     }
 }
 
@@ -280,6 +292,10 @@ impl Vehicle {
             let axis = self.ang_vel.normalize();
             let angle = self.ang_vel.length() * dt;
             self.rot = (Quat::from_axis_angle(axis, angle) * self.rot).normalize();
+        }
+
+        for wheel in &mut self.wheels {
+            wheel.spin_angle = (wheel.spin_angle + wheel.spin * dt) % std::f32::consts::TAU;
         }
 
         self.resolve_wall(track);
