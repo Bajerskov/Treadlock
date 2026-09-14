@@ -31,21 +31,45 @@ struct Args {
     car_fit: model::Fit,
 }
 
+/// Read `--flag value`. A flag that is present but missing or malformed is an
+/// error rather than a silent fall back to the default, so a mistyped option
+/// cannot look like it worked.
 fn arg_value<T: std::str::FromStr>(argv: &[String], flag: &str) -> Option<T> {
-    argv.iter()
-        .position(|a| a == flag)
-        .and_then(|i| argv.get(i + 1))
-        .and_then(|s| s.parse().ok())
+    let index = argv.iter().position(|a| a == flag)?;
+    // A negative number is a value; another `--option` is not.
+    match argv.get(index + 1) {
+        Some(raw) if !raw.starts_with("--") => match raw.parse() {
+            Ok(value) => Some(value),
+            Err(_) => fail(&format!("{flag}: could not read a value from {raw:?}")),
+        },
+        _ => fail(&format!("{flag}: expected a value after it")),
+    }
+}
+
+/// Read `--flag [value]`, where omitting the value is allowed and means
+/// `default`.
+fn optional_value<T: std::str::FromStr>(argv: &[String], flag: &str, default: T) -> Option<T> {
+    let index = argv.iter().position(|a| a == flag)?;
+    match argv.get(index + 1) {
+        Some(raw) if !raw.starts_with("--") => match raw.parse() {
+            Ok(value) => Some(value),
+            Err(_) => fail(&format!("{flag}: could not read a value from {raw:?}")),
+        },
+        _ => Some(default),
+    }
+}
+
+fn fail(message: &str) -> ! {
+    eprintln!("{message}");
+    std::process::exit(2);
 }
 
 fn parse_args() -> Args {
     let argv: Vec<String> = std::env::args().collect();
     Args {
         seed: arg_value(&argv, "--seed").unwrap_or(7),
-        headless: argv
-            .iter()
-            .any(|a| a == "--headless")
-            .then(|| arg_value(&argv, "--headless").unwrap_or(60.0)),
+        // Bare `--headless` is valid and means a default run length.
+        headless: optional_value(&argv, "--headless", 60.0),
         trace: argv.iter().any(|a| a == "--trace"),
         vsync: !argv.iter().any(|a| a == "--no-vsync"),
         car: arg_value(&argv, "--car"),
