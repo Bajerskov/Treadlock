@@ -22,6 +22,11 @@ struct Push {
 };
 var<push_constant> pc: Push;
 
+// Set 1: the material's base colour map. Draws without one bind a single white
+// pixel, so this is always valid and the shader needs no branch.
+@group(1) @binding(0) var base_color_map: texture_2d<f32>;
+@group(1) @binding(1) var base_color_sampler: sampler;
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
@@ -102,7 +107,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let v = view_vec / dist;
     let l = normalize(frame.sun.xyz);
 
-    var albedo = pc.tint.rgb;
+    // Tint multiplies the map, so an untextured draw keeps its flat colour and
+    // a textured one is modulated rather than replaced.
+    let sampled = textureSample(base_color_map, base_color_sampler, in.uv);
+    var albedo = pc.tint.rgb * sampled.rgb;
     var emissive = vec3<f32>(0.0);
 
     if (pc.params.x > 1.5) {

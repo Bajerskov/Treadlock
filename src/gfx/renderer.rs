@@ -8,6 +8,7 @@ use super::buffer::Buffer;
 use super::context::Context;
 use super::shader;
 use super::swapchain::{color_range, Swapchain, DEPTH_FORMAT};
+use super::texture::Texture;
 use crate::mesh::Mesh;
 use crate::particles::{ParticleVertex, Particles, MAX_PARTICLES};
 use crate::track::Vertex;
@@ -78,6 +79,9 @@ pub struct Draw<'a> {
     pub surface: f32,
     pub emissive: f32,
     pub metallic: f32,
+    /// Base colour map. None binds the white fallback, so the shader never has
+    /// to branch on whether a texture exists.
+    pub texture: Option<&'a Texture>,
 }
 
 pub struct Renderer {
@@ -85,6 +89,9 @@ pub struct Renderer {
     pipeline: vk::Pipeline,
     descriptor_pool: vk::DescriptorPool,
     descriptor_layout: vk::DescriptorSetLayout,
+    pub texture_layout: vk::DescriptorSetLayout,
+    pub texture_pool: vk::DescriptorPool,
+    white: Option<Texture>,
     particle_pipeline: vk::Pipeline,
     /// Quad indices for the whole pool, uploaded once and reused.
     particle_indices: Buffer,
@@ -113,11 +120,52 @@ impl Renderer {
                 )
                 .expect("descriptor set layout");
 
+            // Set 1 holds the material's base colour map, separate from the
+            // per-frame set so it can be rebound per draw. naga lowers a WGSL
+            // texture and sampler to two distinct bindings rather than one
+            // combined descriptor, so the layout has to match that.
+            let texture_layout = ctx
+                .device
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&[
+                        vk::DescriptorSetLayoutBinding::default()
+                            .binding(0)
+                            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                            .descriptor_count(1)
+                            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                        vk::DescriptorSetLayoutBinding::default()
+                            .binding(1)
+                            .descriptor_type(vk::DescriptorType::SAMPLER)
+                            .descriptor_count(1)
+                            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                    ]),
+                    None,
+                )
+                .expect("texture set layout");
+
+            let texture_pool_sizes = [
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(16),
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::SAMPLER)
+                    .descriptor_count(16),
+            ];
+            let texture_pool = ctx
+                .device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .pool_sizes(&texture_pool_sizes)
+                        .max_sets(16),
+                    None,
+                )
+                .expect("texture descriptor pool");
+
             let push_range = [vk::PushConstantRange::default()
                 .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                 .offset(0)
                 .size(std::mem::size_of::<Push>() as u32)];
-            let set_layouts = [descriptor_layout];
+            let set_layouts = [descriptor_layout, texture_layout];
             let pipeline_layout = ctx
                 .device
                 .create_pipeline_layout(
@@ -223,7 +271,12 @@ impl Renderer {
                 vk::BufferUsageFlags::INDEX_BUFFER,
             );
 
+            let white = Texture::white(ctx, texture_layout, texture_pool);
+
             Renderer {
+                texture_layout,
+                texture_pool,
+                white: Some(white),
                 particle_pipeline: build_particle_pipeline(ctx, swapchain, pipeline_layout),
                 particle_indices,
                 pipeline_layout,
@@ -373,6 +426,15 @@ impl Renderer {
                     0,
                     bytemuck::bytes_of(&push),
                 );
+                let texture = d.texture.or(self.white.as_ref()).expect("white fallback");
+                ctx.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline_layout,
+                    1,
+                    &[texture.descriptor_set],
+                    &[],
+                );
                 ctx.device
                     .cmd_bind_vertex_buffers(cmd, 0, &[d.mesh.vertex.handle], &[0]);
                 ctx.device.cmd_bind_index_buffer(
@@ -493,9 +555,15 @@ impl Renderer {
                 frame.particle_vertices.destroy(ctx);
             }
             self.frames.clear();
+            if let Some(mut white) = self.white.take() {
+                white.destroy(ctx);
+            }
             ctx.device.destroy_descriptor_pool(self.descriptor_pool, None);
+            ctx.device.destroy_descriptor_pool(self.texture_pool, None);
             ctx.device
                 .destroy_descriptor_set_layout(self.descriptor_layout, None);
+            ctx.device
+                .destroy_descriptor_set_layout(self.texture_layout, None);
             ctx.device.destroy_pipeline(self.pipeline, None);
             ctx.device.destroy_pipeline(self.particle_pipeline, None);
             self.particle_indices.destroy(ctx);

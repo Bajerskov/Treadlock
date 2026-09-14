@@ -333,15 +333,23 @@ impl Track {
         }
     }
 
-    /// A start position and orientation on the tube floor.
-    pub fn spawn(&self, lane_offset: f32) -> (Vec3, Quat) {
-        let f = &self.frames[self.start];
-        // "Floor" is whichever side of the tube is furthest from world up.
+    /// Position and orientation for a car on the starting grid. Slots run two
+    /// abreast back from the start line, staggered so nobody starts inside
+    /// anybody else.
+    pub fn grid_slot(&self, index: usize) -> (Vec3, Quat) {
+        let n = self.frames.len();
+        let row = index / 2;
+        let side = if index % 2 == 0 { -1.0 } else { 1.0 };
+        let back_metres = 6.0 + row as f32 * 9.0;
+        let steps = (back_metres / SAMPLE_SPACING) as usize % n;
+
+        let f = &self.frames[(self.start + n - steps) % n];
         let down = pick_floor_direction(f);
-        let right = f.tangent.cross(-down).normalize();
-        let pos = f.pos + down * (f.radius - 1.6) + right * lane_offset;
+        let right = f.tangent.cross(-down).normalize_or(Vec3::X);
+        let pos = f.pos + down * (f.radius - 1.6) + right * (side * 3.4);
         (pos, look_rotation(f.tangent, -down))
     }
+
 }
 
 /// Lay boost pads along the floor at regular intervals, skipping the run up to
@@ -589,8 +597,8 @@ mod tests {
     #[test]
     fn spawn_sits_inside_the_tube_facing_along_it() {
         let track = Track::generate(7);
-        let (pos, rot) = track.spawn(0.0);
-        let surf = track.surface(pos, 0);
+        let (pos, rot) = track.grid_slot(0);
+        let surf = track.surface(pos, track.start);
 
         assert!(surf.gap > 0.0, "spawn is outside the tube wall");
         assert!(

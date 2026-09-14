@@ -192,6 +192,18 @@ fn run(args: Args) {
     let mut pad_mesh = GpuMesh::upload(&mut ctx, "boost pads", &pad_vertices, &pad_indices);
     println!("boost pads: {}", sim.track.boost_pads.len());
 
+    // Upload the model's base colour map, if it brought one.
+    let mut car_texture = loaded.as_ref().and_then(|m| m.base_color.as_ref()).map(|image| {
+        gfx::texture::Texture::new(
+            &mut ctx,
+            renderer.texture_layout,
+            renderer.texture_pool,
+            image.width,
+            image.height,
+            &image.rgba,
+        )
+    });
+
     let mut particles = particles::Particles::new();
     let mut camera = Camera::new(&sim.player);
     camera.snap(&sim.player, &sim.track);
@@ -284,6 +296,7 @@ fn run(args: Args) {
                         &chassis_mesh,
                         &wheel_mesh,
                         &pad_mesh,
+                        car_texture.as_ref(),
                         show_wheels,
                     );
                     renderer.draw(
@@ -300,10 +313,12 @@ fn run(args: Args) {
                     if fps_timer.elapsed().as_secs_f32() >= 1.0 {
                         let fps = frames as f32 / fps_timer.elapsed().as_secs_f32();
                         window.set_title(&format!(
-                            "Treadlock - {:.0} fps - {:.0} km/h - lap {}",
+                            "Treadlock - {:.0} fps - {:.0} km/h - lap {} - P{}/{}",
                             fps,
                             sim.player.speed_kph(),
-                            sim.lap + 1
+                            sim.lap + 1,
+                            sim.player_position(),
+                            sim.opponents.len() + 1
                         ));
                         frames = 0;
                         fps_timer = Instant::now();
@@ -319,6 +334,9 @@ fn run(args: Args) {
                     renderer.destroy(&mut ctx);
                     track_mesh.destroy(&mut ctx);
                     pad_mesh.destroy(&mut ctx);
+                    if let Some(texture) = car_texture.as_mut() {
+                        texture.destroy(&mut ctx);
+                    }
                     chassis_mesh.destroy(&mut ctx);
                     wheel_mesh.destroy(&mut ctx);
                     swapchain.destroy(&mut ctx);
@@ -335,55 +353,69 @@ fn build_draws<'a>(
     chassis_mesh: &'a GpuMesh,
     wheel_mesh: &'a GpuMesh,
     pad_mesh: &'a GpuMesh,
+    car_texture: Option<&'a gfx::texture::Texture>,
     show_wheels: bool,
 ) -> Vec<Draw<'a>> {
-    let mut draws = vec![Draw {
-        mesh: track_mesh,
-        model: Mat4::IDENTITY,
-        tint: Vec3::new(0.30, 0.33, 0.40),
-        surface: 1.0,
-        emissive: 0.0,
-        metallic: 0.35,
-    }];
-
-    // Pads are their own mesh so they can glow without needing a per-vertex
-    // material on the tube. surface = 2 selects the pad shading.
-    draws.push(Draw {
-        mesh: pad_mesh,
-        model: Mat4::IDENTITY,
-        tint: Vec3::new(0.10, 0.45, 0.75),
-        surface: 2.0,
-        emissive: 1.0,
-        metallic: 0.5,
-    });
-
-    let car = &sim.player;
-    let body = Mat4::from_rotation_translation(car.rot, car.pos);
-    let boosting = car.boost < 0.999;
-    draws.push(Draw {
-        mesh: chassis_mesh,
-        model: body,
-        tint: Vec3::new(0.85, 0.16, 0.10),
-        surface: 0.0,
-        emissive: if boosting { 0.6 } else { 0.0 },
-        metallic: 0.85,
-    });
-
-    if !show_wheels {
-        return draws;
-    }
-    for wheel in &car.wheels {
-        // Wheels are positioned by the physics contact solve, then spun about
-        // their axle for the visual.
-        let spin = Quat::from_rotation_x(wheel.spin_angle);
-        draws.push(Draw {
-            mesh: wheel_mesh,
-            model: Mat4::from_rotation_translation(car.rot * spin, wheel.world_pos),
-            tint: Vec3::new(0.09, 0.09, 0.11),
-            surface: 0.0,
+    let mut draws = vec![
+        Draw {
+            mesh: track_mesh,
+            model: Mat4::IDENTITY,
+            tint: Vec3::new(0.30, 0.33, 0.40),
+            surface: 1.0,
             emissive: 0.0,
-            metallic: 0.2,
+            metallic: 0.35,
+            texture: None,
+        },
+        // Pads are their own mesh so they can glow without needing a per-vertex
+        // material on the tube. surface = 2 selects the pad shading.
+        Draw {
+            mesh: pad_mesh,
+            model: Mat4::IDENTITY,
+            tint: Vec3::new(0.10, 0.45, 0.75),
+            surface: 2.0,
+            emissive: 1.0,
+            metallic: 0.5,
+            texture: None,
+        },
+    ];
+
+    // Player first, then the field. A textured model carries its own colours,
+    // so its tint stays near white and the livery comes from the map; the
+    // procedural body has no map and is coloured by the tint alone.
+    let livery = |base: Vec3| if car_texture.is_some() { Vec3::splat(0.9) * base * 1.6 } else { base };
+
+    let cars = std::iter::once((&sim.player, Vec3::new(0.85, 0.16, 0.10)))
+        .chain(sim.opponents.iter().map(|o| (&o.car, o.tint)));
+
+    for (car, colour) in cars {
+        let boosting = car.pad_boost > 0.0 || car.boost < 0.999;
+        draws.push(Draw {
+            mesh: chassis_mesh,
+            model: Mat4::from_rotation_translation(car.rot, car.pos),
+            tint: livery(colour),
+            surface: 0.0,
+            emissive: if boosting { 0.6 } else { 0.0 },
+            metallic: 0.85,
+            texture: car_texture,
         });
+
+        if !show_wheels {
+            continue;
+        }
+        for wheel in &car.wheels {
+            // Wheels are positioned by the physics contact solve, then spun
+            // about their axle for the visual.
+            let spin = Quat::from_rotation_x(wheel.spin_angle);
+            draws.push(Draw {
+                mesh: wheel_mesh,
+                model: Mat4::from_rotation_translation(car.rot * spin, wheel.world_pos),
+                tint: Vec3::new(0.09, 0.09, 0.11),
+                surface: 0.0,
+                emissive: 0.0,
+                metallic: 0.2,
+                texture: car_texture,
+            });
+        }
     }
     draws
 }

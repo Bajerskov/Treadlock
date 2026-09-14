@@ -46,7 +46,16 @@ impl Default for Fit {
     }
 }
 
+/// Decoded RGBA8 image ready for upload.
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 pub struct Model {
+    /// Base colour map, converted to RGBA8 whatever the file stored.
+    pub base_color: Option<Image>,
     pub chassis: Mesh,
     /// Present only when the file has a node whose name mentions a wheel. A
     /// single fused mesh - what generators usually produce - has none, and its
@@ -80,8 +89,21 @@ impl Model {
     /// Load a .glb or .gltf file, refit it to the physics chassis, and split out
     /// a wheel mesh if the file names one.
     pub fn load(path: &str, fit: Fit) -> Result<Model, String> {
-        let (document, buffers, _images) =
+        let (document, buffers, images) =
             gltf::import(path).map_err(|e| format!("failed to read {path}: {e}"))?;
+
+        // Base colour map of the first textured material. A generated car is a
+        // single material, so taking the first handles the common case without
+        // pretending to be a full material system.
+        let base_color = document
+            .materials()
+            .find_map(|m| {
+                m.pbr_metallic_roughness()
+                    .base_color_texture()
+                    .map(|t| t.texture().source().index())
+            })
+            .and_then(|index| images.get(index))
+            .map(to_rgba);
 
         let mut chassis_parts: Vec<Mesh> = Vec::new();
         let mut wheel_parts: Vec<Mesh> = Vec::new();
@@ -207,7 +229,12 @@ impl Model {
             );
         }
 
-        Ok(Model { chassis, wheel })
+        match &base_color {
+            Some(image) => println!("  texture: {}x{} base colour", image.width, image.height),
+            None => println!("  texture: none in file, rendering with a flat tint"),
+        }
+
+        Ok(Model { base_color, chassis, wheel })
     }
 }
 
@@ -313,6 +340,45 @@ fn compute_flat_normals(vertices: &mut [Vertex], indices: &[u32]) {
     for (v, n) in vertices.iter_mut().zip(accum) {
         v.normal = n.normalize_or(Vec3::Y).to_array();
     }
+}
+
+/// Widen whatever the file stored into RGBA8. glTF permits several layouts and
+/// the GPU side only wants one.
+fn to_rgba(data: &gltf::image::Data) -> Image {
+    use gltf::image::Format;
+    let pixels = data.pixels.as_slice();
+    let count = (data.width * data.height) as usize;
+    let mut rgba = Vec::with_capacity(count * 4);
+
+    match data.format {
+        Format::R8G8B8A8 => rgba.extend_from_slice(pixels),
+        Format::R8G8B8 => {
+            for chunk in pixels.chunks_exact(3) {
+                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+        }
+        Format::R8G8 => {
+            for chunk in pixels.chunks_exact(2) {
+                rgba.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
+            }
+        }
+        Format::R8 => {
+            for &v in pixels {
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        // 16-bit variants: keep the high byte, which is all an 8-bit target can
+        // show anyway.
+        _ => {
+            let stride = (pixels.len() / count.max(1)).max(1);
+            for chunk in pixels.chunks(stride) {
+                let v = *chunk.first().unwrap_or(&255);
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+    }
+    rgba.resize(count * 4, 255);
+    Image { width: data.width, height: data.height, rgba }
 }
 
 fn merge(parts: Vec<Mesh>) -> Mesh {

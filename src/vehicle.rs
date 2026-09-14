@@ -102,8 +102,8 @@ pub struct Vehicle {
 }
 
 impl Vehicle {
-    pub fn new(track: &Track, lane_offset: f32) -> Vehicle {
-        let (pos, rot) = track.spawn(lane_offset);
+    pub fn new(track: &Track, grid_index: usize) -> Vehicle {
+        let (pos, rot) = track.grid_slot(grid_index);
         let x = HALF_EXTENTS.x * 0.95;
         let z = HALF_EXTENTS.z * 0.72;
         Vehicle {
@@ -381,7 +381,9 @@ impl Vehicle {
 
 /// Steer toward a point further along the centerline. Used by the headless
 /// drivability check and as the basis for opponent AI.
-pub fn autopilot(track: &Track, v: &Vehicle, lookahead: f32) -> Controls {
+/// `lane` shifts the aim point sideways, in metres. Without it every AI car
+/// tracks the identical line and they drive in single file through each other.
+pub fn autopilot_lane(track: &Track, v: &Vehicle, lookahead: f32, lane: f32) -> Controls {
     let surf = track.surface(v.pos, v.hint);
     let n = track.frames.len();
     let steps = (lookahead / 6.0).max(1.0) as usize;
@@ -391,7 +393,9 @@ pub fn autopilot(track: &Track, v: &Vehicle, lookahead: f32) -> Controls {
         let d = Vec3::NEG_Y - target_frame.tangent * Vec3::NEG_Y.dot(target_frame.tangent);
         d.normalize_or(target_frame.normal)
     };
-    let target = target_frame.pos + ahead_down * (target_frame.radius - 1.6);
+    let ahead_right = target_frame.tangent.cross(-ahead_down).normalize_or(Vec3::X);
+    let target =
+        target_frame.pos + ahead_down * (target_frame.radius - 1.6) + ahead_right * lane;
 
     let to_target = target - v.pos;
     let up = -surf.down;
@@ -413,4 +417,9 @@ pub fn autopilot(track: &Track, v: &Vehicle, lookahead: f32) -> Controls {
         boost: facing > 0.5 && v.speed() < 90.0,
         handbrake: false,
     }
+}
+
+/// Centre-line autopilot, used by the headless drivability check.
+pub fn autopilot(track: &Track, v: &Vehicle, lookahead: f32) -> Controls {
+    autopilot_lane(track, v, lookahead, 0.0)
 }
