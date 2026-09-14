@@ -28,7 +28,9 @@ fn vs_main(
     @location(2) color: vec4<f32>,
 ) -> VsOut {
     var out: VsOut;
-    let ndc = pos / max(pc.params.xy, vec2<f32>(1.0, 1.0)) * 2.0 - vec2<f32>(1.0, 1.0);
+    // Must match ui::pixel_to_ndc exactly; see the note there on the y sign.
+    let size = max(pc.params.xy, vec2<f32>(1.0, 1.0));
+    let ndc = vec2<f32>(pos.x / size.x * 2.0 - 1.0, 1.0 - pos.y / size.y * 2.0);
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.uv = uv;
     out.color = color;

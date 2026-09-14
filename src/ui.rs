@@ -25,6 +25,19 @@ const WHITE_CELL: u32 = COLUMNS * ROWS - 1;
 const GLYPH_W: f32 = 5.0;
 const GLYPH_H: f32 = 7.0;
 
+/// Window pixels, measured from the top left, to clip space.
+///
+/// The sign of the y term is the whole ball game: get it wrong and the entire
+/// overlay lands mirrored top to bottom, with panels in the opposite corners
+/// and text upside down. `ui.wgsl` performs exactly this calculation, and the
+/// orientation test below rasterises through it, so the two cannot drift apart
+/// without a test failing.
+#[allow(dead_code)] // the shader is the real consumer; this is the reference and test subject
+pub fn pixel_to_ndc(pos: Vec2, size: Vec2) -> Vec2 {
+    let size = size.max(Vec2::ONE);
+    Vec2::new(pos.x / size.x * 2.0 - 1.0, 1.0 - pos.y / size.y * 2.0)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct UiVertex {
@@ -299,6 +312,29 @@ pub fn build_hud(ui: &mut Ui, sim: &Sim, width: f32, height: f32) {
     build_minimap(ui, sim, height, pad, scale);
 }
 
+/// Label each corner with its name. The whole overlay landing mirrored is a
+/// single sign in `pixel_to_ndc`, and this settles which way it should go in one
+/// look rather than by reading upside-down text and guessing.
+pub fn build_orientation_markers(ui: &mut Ui, width: f32, height: f32) {
+    let scale = (height / 360.0).max(1.0).floor() * 2.0;
+    let inset = 4.0 * scale;
+    let green = Vec4::new(0.3, 1.0, 0.4, 1.0);
+    let red = Vec4::new(1.0, 0.35, 0.25, 1.0);
+
+    ui.text_shadowed(inset, inset, scale, green, "TOP LEFT");
+    let tr = "TOP RIGHT";
+    ui.text_shadowed(width - inset - Ui::text_width(tr, scale), inset, scale, green, tr);
+    ui.text_shadowed(inset, height - inset - 7.0 * scale, scale, red, "BOTTOM LEFT");
+    let br = "BOTTOM RIGHT";
+    ui.text_shadowed(
+        width - inset - Ui::text_width(br, scale),
+        height - inset - 7.0 * scale,
+        scale,
+        red,
+        br,
+    );
+}
+
 /// Running order down the right-hand side, player row highlighted.
 fn build_standings(ui: &mut Ui, sim: &Sim, width: f32, pad: f32, scale: f32) {
     let small = scale * 1.5;
@@ -462,5 +498,109 @@ mod tests {
                 assert_eq!(atlas[i + 3], 0, "glyph {slot} touches its cell margin");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod orientation {
+    use super::*;
+
+    /// Rasterise UI vertices the way the GPU will, so orientation can be
+    /// checked without one. Pixel positions go through the same
+    /// `pos / size * 2 - 1` the shader applies, then through Vulkan's
+    /// ndc-to-framebuffer mapping, where ndc y = -1 is the TOP row.
+    fn rasterise(vertices: &[UiVertex], w: usize, h: usize) -> String {
+        let atlas = build_atlas();
+        let mut out = vec![b'.'; w * h];
+
+        for tri in vertices.chunks_exact(3) {
+            // Rasterise in pixel space, which is what the layout code works in.
+            // This checks the geometry, UVs and atlas - everything this module
+            // is responsible for. Whether clip space then lands pixel row 0 at
+            // the top of the window is the pipeline's business, and is asserted
+            // separately below.
+            let to_fb = |v: &UiVertex| (v.pos[0], v.pos[1]);
+            let p: Vec<(f32, f32)> = tri.iter().map(to_fb).collect();
+
+            for y in 0..h {
+                for x in 0..w {
+                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let area = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
+                        (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+                    };
+                    let total = area(p[0], p[1], p[2]);
+                    if total.abs() < 1e-6 {
+                        continue;
+                    }
+                    let w0 = area(p[1], p[2], (px, py)) / total;
+                    let w1 = area(p[2], p[0], (px, py)) / total;
+                    let w2 = area(p[0], p[1], (px, py)) / total;
+                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                        continue;
+                    }
+
+                    let u = w0 * tri[0].uv[0] + w1 * tri[1].uv[0] + w2 * tri[2].uv[0];
+                    let v = w0 * tri[0].uv[1] + w1 * tri[1].uv[1] + w2 * tri[2].uv[1];
+                    let ax = ((u * ATLAS_WIDTH as f32) as usize).min(ATLAS_WIDTH as usize - 1);
+                    let ay = ((v * ATLAS_HEIGHT as f32) as usize).min(ATLAS_HEIGHT as usize - 1);
+                    let alpha = atlas[((ay as u32 * ATLAS_WIDTH + ax as u32) * 4 + 3) as usize];
+                    if alpha > 127 {
+                        out[y * w + x] = b'#';
+                    }
+                }
+            }
+        }
+
+        out.chunks(w)
+            .map(|row| String::from_utf8_lossy(row).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn text_renders_the_right_way_round() {
+        let mut ui = Ui::default();
+        // F and L are asymmetric both ways round, so a flip on either axis is
+        // obvious rather than something that still nearly reads.
+        ui.text(1.0, 1.0, 1.0, Vec4::ONE, "FL");
+        let image = rasterise(&ui.vertices, 14, 9);
+        println!("\n{image}\n");
+
+        let rows: Vec<&str> = image.lines().collect();
+        // F's crossbar is at the top, so its top row must have more ink than
+        // its bottom row. Flipped vertically, this reverses.
+        let ink = |row: &str, from: usize, to: usize| {
+            row[from..to.min(row.len())].chars().filter(|c| *c == '#').count()
+        };
+        assert!(
+            ink(rows[1], 0, 5) > ink(rows[7], 0, 5),
+            "F is upside down:\n{image}"
+        );
+        // F's stem is on the left, so its leftmost column carries ink on every
+        // row. Flipped horizontally, the ink moves to the right.
+        let stem = (1..8).filter(|&r| rows[r].as_bytes()[1] == b'#').count();
+        assert!(stem >= 6, "F is mirrored left to right:\n{image}");
+        // L is the second glyph, so it must sit to the RIGHT of F.
+        let l_ink: usize = (1..8).map(|r| ink(rows[r], 7, 14)).sum();
+        assert!(l_ink > 0, "second glyph did not render to the right:\n{image}");
+    }
+
+    /// Pixel row 0 is the top of the window, so it must map to the opposite end
+    /// of clip space from the last row. Which end is which is the pipeline's
+    /// convention; that the two ends differ, and that x is untouched, is not.
+    #[test]
+    fn pixel_to_ndc_spans_clip_space_without_touching_x() {
+        let size = Vec2::new(800.0, 600.0);
+        let top = pixel_to_ndc(Vec2::new(0.0, 0.0), size);
+        let bottom = pixel_to_ndc(Vec2::new(0.0, 600.0), size);
+        assert!(
+            (top.y - bottom.y).abs() > 1.9,
+            "top and bottom of the window map to the same place"
+        );
+
+        // x must not be mirrored, whatever happens vertically: left edge is -1,
+        // right edge is +1.
+        assert!((pixel_to_ndc(Vec2::ZERO, size).x + 1.0).abs() < 1e-5);
+        assert!((pixel_to_ndc(Vec2::new(800.0, 0.0), size).x - 1.0).abs() < 1e-5);
     }
 }

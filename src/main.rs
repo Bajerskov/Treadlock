@@ -27,6 +27,8 @@ struct Args {
     seed: u64,
     headless: Option<f32>,
     trace: bool,
+    /// Label the screen corners, to confirm which way the overlay is mapped.
+    debug_hud: bool,
     vsync: bool,
     /// Path to a .glb or .gltf car model. Falls back to the procedural box.
     car: Option<String>,
@@ -74,6 +76,7 @@ fn parse_args() -> Args {
         // Bare `--headless` is valid and means a default run length.
         headless: optional_value(&argv, "--headless", 60.0),
         trace: argv.iter().any(|a| a == "--trace"),
+        debug_hud: argv.iter().any(|a| a == "--debug-hud"),
         vsync: !argv.iter().any(|a| a == "--no-vsync"),
         car: arg_value(&argv, "--car"),
         car_fit: model::Fit {
@@ -313,12 +316,12 @@ fn run(args: Args) {
                         car_texture.as_ref(),
                         show_wheels,
                     );
-                    ui::build_hud(
-                        &mut hud,
-                        &sim,
-                        swapchain.extent.width as f32,
-                        swapchain.extent.height as f32,
-                    );
+                    let (screen_w, screen_h) =
+                        (swapchain.extent.width as f32, swapchain.extent.height as f32);
+                    ui::build_hud(&mut hud, &sim, screen_w, screen_h);
+                    if args.debug_hud {
+                        ui::build_orientation_markers(&mut hud, screen_w, screen_h);
+                    }
 
                     renderer.draw(
                         &mut ctx,
