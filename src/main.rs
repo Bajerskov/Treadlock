@@ -2,6 +2,7 @@ mod camera;
 mod gfx;
 mod input;
 mod mesh;
+mod model;
 mod sim;
 mod track;
 mod vehicle;
@@ -24,6 +25,10 @@ struct Args {
     headless: Option<f32>,
     trace: bool,
     vsync: bool,
+    /// Path to a .glb or .gltf car model. Falls back to the procedural box.
+    car: Option<String>,
+    /// Extra yaw in degrees, for a model the automatic fit turns the wrong way.
+    car_yaw: f32,
 }
 
 fn arg_value<T: std::str::FromStr>(argv: &[String], flag: &str) -> Option<T> {
@@ -43,6 +48,8 @@ fn parse_args() -> Args {
             .then(|| arg_value(&argv, "--headless").unwrap_or(60.0)),
         trace: argv.iter().any(|a| a == "--trace"),
         vsync: !argv.iter().any(|a| a == "--no-vsync"),
+        car: arg_value(&argv, "--car"),
+        car_yaw: arg_value(&argv, "--car-yaw").unwrap_or(0.0),
     }
 }
 
@@ -55,6 +62,30 @@ fn main() {
         println!("forward.wgsl compiled: {} words of SPIR-V", spirv.len());
         return;
     }
+    // Loading and refitting a model needs no GPU either, so a file can be
+    // checked before committing to a run.
+    if std::env::args().any(|a| a == "--check-model") {
+        let Some(path) = args.car.as_ref() else {
+            eprintln!("--check-model needs --car <path to .glb>");
+            std::process::exit(2);
+        };
+        match model::Model::load(path, args.car_yaw) {
+            Ok(m) => {
+                let tris = m.chassis.indices.len() / 3;
+                if tris > 40_000 {
+                    println!(
+                        "warning: {tris} triangles is heavy for a 24 CU GPU; consider decimating to 20-30k"
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     match args.headless {
         Some(seconds) => headless(args.seed, seconds, args.trace),
         None => run(args),
@@ -96,9 +127,30 @@ fn run(args: Args) {
         &sim.track.vertices,
         &sim.track.indices,
     );
-    let mut chassis_mesh =
-        GpuMesh::from_mesh(&mut ctx, "chassis", &mesh::chassis(Vec3::new(1.15, 0.45, 2.1), 0.72));
-    let mut wheel_mesh = GpuMesh::from_mesh(&mut ctx, "wheel", &mesh::wheel(0.62, 0.22, 16));
+    // A loaded model replaces the procedural body. If it has no separately
+    // named wheel node its wheels are already modelled into the body, so drawing
+    // the engine's own wheels on top would double them up.
+    let loaded = args.car.as_ref().and_then(|path| match model::Model::load(path, args.car_yaw) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!("{e}\nfalling back to the procedural car");
+            None
+        }
+    });
+    let show_wheels = loaded.as_ref().map_or(true, |m| m.wheel.is_some());
+
+    let mut chassis_mesh = match &loaded {
+        Some(m) => GpuMesh::from_mesh(&mut ctx, "chassis", &m.chassis),
+        None => GpuMesh::from_mesh(
+            &mut ctx,
+            "chassis",
+            &mesh::chassis(Vec3::new(1.15, 0.45, 2.1), 0.72),
+        ),
+    };
+    let mut wheel_mesh = match loaded.as_ref().and_then(|m| m.wheel.as_ref()) {
+        Some(w) => GpuMesh::from_mesh(&mut ctx, "wheel", w),
+        None => GpuMesh::from_mesh(&mut ctx, "wheel", &mesh::wheel(0.62, 0.22, 16)),
+    };
 
     let mut camera = Camera::new(&sim.player);
     let mut input = input::Input::new();
@@ -162,7 +214,8 @@ fn run(args: Args) {
 
                     let aspect =
                         swapchain.extent.width as f32 / swapchain.extent.height.max(1) as f32;
-                    let draws = build_draws(&sim, &track_mesh, &chassis_mesh, &wheel_mesh);
+                    let draws =
+                        build_draws(&sim, &track_mesh, &chassis_mesh, &wheel_mesh, show_wheels);
                     renderer.draw(
                         &mut ctx,
                         &swapchain,
@@ -209,6 +262,7 @@ fn build_draws<'a>(
     track_mesh: &'a GpuMesh,
     chassis_mesh: &'a GpuMesh,
     wheel_mesh: &'a GpuMesh,
+    show_wheels: bool,
 ) -> Vec<Draw<'a>> {
     let mut draws = vec![Draw {
         mesh: track_mesh,
@@ -231,6 +285,9 @@ fn build_draws<'a>(
         metallic: 0.85,
     });
 
+    if !show_wheels {
+        return draws;
+    }
     for wheel in &car.wheels {
         // Wheels are positioned by the physics contact solve, then spun about
         // their axle for the visual.

@@ -17,6 +17,8 @@ Playable vertical slice in progress.
 - [x] Fixed-timestep sim with lap timing
 - [x] Forward Vulkan renderer with chase camera
 - [x] Keyboard and gamepad input
+- [x] glTF/GLB car models
+- [ ] Model textures (geometry only for now)
 - [ ] Ray-traced reflections
 - [ ] Opponents, weapons, audio, HUD
 
@@ -27,9 +29,10 @@ shaders are authored in WGSL and translated to SPIR-V with `naga`, which is
 pure Rust.
 
 ```sh
-cargo run --release                 # play
-cargo run --release -- --seed 42    # a different track
-cargo run --release -- --no-vsync   # uncapped frame rate
+cargo run --release                    # play
+cargo run --release -- --seed 42       # a different track
+cargo run --release -- --no-vsync      # uncapped frame rate
+cargo run --release -- --car car.glb   # use your own car model
 ```
 
 ### Controls
@@ -58,6 +61,37 @@ cargo run --release -- --check-shaders        # translate WGSL, no GPU needed
 Headless mode reports average and top speed, wheel contact percentage, lap
 times, and whether the car ever escaped the tube. A diverging or escaping run
 exits non-zero.
+
+## Car models
+
+Pass a `.glb` or `.gltf` file with `--car`. Models are refitted on load rather
+than having to arrive correct, because generated models (Meshy, Tripo and
+similar) come out at arbitrary scale and facing:
+
+- scaled so the longest horizontal axis is 4.2 m, the physics chassis length
+- recentred on the origin, where the physics body sits
+- yawed 90 degrees automatically when the model is wider than it is long, with
+  `--car-yaw <degrees>` to correct anything the guess gets wrong
+- normals generated when the file has none
+
+If any node is named with `wheel`, `tyre` or `tire` it becomes the wheel mesh,
+drawn four times with spin and steering applied. Otherwise the model is assumed
+to include its own wheels and the engine does not draw its own on top.
+
+Check a file without launching the game, and without a GPU:
+
+```sh
+cargo run --release -- --check-model --car car.glb
+```
+
+That reports triangle count, source and fitted dimensions, and whether a
+separate wheel mesh was found. Textures are not loaded yet, so models currently
+render with a flat tint.
+
+Note that the car spends time inverted, and the physics treats a flip as
+recoverable rather than fatal. A model with a strongly asymmetric silhouette
+will read oddly during those moments; symmetric, big-wheeled designs suit the
+game better.
 
 ## How it works
 
@@ -102,5 +136,6 @@ they mean for this engine.
 | `src/camera.rs` | Chase camera |
 | `src/input.rs` | Keyboard, and gamepads via Linux evdev |
 | `src/mesh.rs` | Runtime car meshes |
+| `src/model.rs` | glTF/GLB loading and refitting |
 | `src/gfx/` | Vulkan context, swapchain, buffers, renderer |
 | `src/shaders/` | WGSL, translated at pipeline build |

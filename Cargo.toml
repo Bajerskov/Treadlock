@@ -13,6 +13,7 @@ bytemuck = { version = "1", features = ["derive"] }
 gpu-allocator = { version = "0.27", default-features = false, features = ["vulkan"] }
 naga = { version = "23", features = ["wgsl-in", "spv-out"] }
 libc = "0.2"
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
 
 [profile.release]
 opt-level = 3
