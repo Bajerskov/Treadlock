@@ -172,7 +172,7 @@ fn run(args: Args) {
         None => GpuMesh::from_mesh(
             &mut ctx,
             "chassis",
-            &mesh::chassis(Vec3::new(1.15, 0.45, 2.1), 0.72),
+            &mesh::chassis(vehicle::HALF_EXTENTS, 0.72),
         ),
     };
     let mut wheel_mesh = match loaded.as_ref().and_then(|m| m.wheel.as_ref()) {

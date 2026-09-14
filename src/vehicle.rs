@@ -16,7 +16,8 @@ use crate::track::{look_rotation, Track};
 const GRAVITY: f32 = 24.0;
 const MASS: f32 = 950.0;
 /// Chassis half-extents (x = half width, y = half height, z = half length).
-const HALF_EXTENTS: Vec3 = Vec3::new(1.15, 0.45, 2.1);
+/// Public so model fitting can size art against the body that actually collides.
+pub const HALF_EXTENTS: Vec3 = Vec3::new(1.15, 0.45, 2.1);
 const WHEEL_RADIUS: f32 = 0.62;
 const SUSPENSION_REST: f32 = 0.55;
 const SUSPENSION_STIFFNESS: f32 = 62000.0;
