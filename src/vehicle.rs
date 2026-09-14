@@ -109,7 +109,7 @@ impl Vehicle {
                 Wheel::new(Vec3::new(-x, 0.0, z), false, true),
                 Wheel::new(Vec3::new(x, 0.0, z), false, true),
             ],
-            hint: track.global_nearest_index(pos),
+            hint: track.start,
             boost: 1.0,
             grounded: false,
             contacts: 0,

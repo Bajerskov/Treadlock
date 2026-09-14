@@ -363,6 +363,27 @@ fn headless(seed: u64, seconds: f32, trace: bool) {
         sim.track.frames.len()
     );
 
+    {
+        // Roof-toward-the-axis holds on the ceiling just as much as on the
+        // floor, so it cannot answer "which side of the tube am I on". The
+        // radial direction against world down can.
+        let surf = sim.track.surface(sim.player.pos, sim.player.hint);
+        let (mut low, mut high) = (f32::MAX, f32::MIN);
+        for f in &sim.track.frames {
+            low = low.min(f.pos.y);
+            high = high.max(f.pos.y);
+        }
+        println!(
+            "spawn: on tube floor {:+.2} (+1 floor, -1 ceiling) | height {:.0} m in a {:.0}..{:.0} m \
+             track | gradient {:+.0}%",
+            surf.down.dot(glam::Vec3::NEG_Y),
+            sim.player.pos.y,
+            low,
+            high,
+            surf.tangent.y * 100.0,
+        );
+    }
+
     let ticks = (seconds / TICK_DT) as usize;
     let mut top_speed = 0.0f32;
     let mut speed_sum = 0.0f64;

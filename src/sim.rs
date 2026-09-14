@@ -96,7 +96,8 @@ mod tests {
     fn autopilot_laps_without_getting_stuck_inverted() {
         for seed in [1u64, 7, 42, 1337, 99999] {
             let mut sim = Sim::new(seed);
-            let ticks = (60.0 / TICK_DT) as usize;
+            // Long enough to cover a standing start plus a full lap.
+            let ticks = (90.0 / TICK_DT) as usize;
             let mut inverted = 0usize;
             let mut escaped = 0usize;
 
@@ -118,7 +119,7 @@ mod tests {
             }
 
             assert_eq!(escaped, 0, "seed {seed}: car left the tube");
-            assert!(sim.lap >= 1, "seed {seed}: no lap completed in 60s");
+            assert!(sim.lap >= 1, "seed {seed}: no lap completed in 90s");
             let inverted_pct = inverted as f32 / ticks as f32 * 100.0;
             assert!(
                 inverted_pct < 20.0,

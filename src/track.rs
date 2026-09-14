@@ -57,6 +57,10 @@ pub struct Surface {
 pub struct Track {
     pub frames: Vec<Frame>,
     pub length: f32,
+    /// Frame holding the start line. Chosen for being flat and straight rather
+    /// than being first: starting on a slope or a crest makes the track dive out
+    /// of view and reads as standing on top of a hill.
+    pub start: usize,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
 }
@@ -180,8 +184,9 @@ impl Track {
         }
         let length = distance + (centers[0] - centers[n - 1]).length();
 
+        let start = pick_start(&frames);
         let (vertices, indices) = build_mesh(&frames);
-        Track { frames, length, vertices, indices }
+        Track { frames, length, start, vertices, indices }
     }
 
     /// Nearest centerline frame to `pos`. `hint` is the previous result; the
@@ -204,6 +209,15 @@ impl Track {
         // (teleport, respawn, first frame) - fall back to a full scan.
         let offset = (best + n - hint) % n;
         if offset == WINDOW || offset == (n - WINDOW) % n {
+            return self.global_nearest_index(pos);
+        }
+        // The edge check alone is not enough: the best frame inside a stale
+        // window can sit just short of the edge and still be the wrong part of
+        // the track entirely. Anything in or near the tube is within a radius
+        // and a couple of samples of its true nearest frame, so a result
+        // farther than that means the hint was stale too.
+        let reach = self.frames[best].radius + SAMPLE_SPACING * 3.0;
+        if best_d > reach * reach {
             return self.global_nearest_index(pos);
         }
         best
@@ -271,13 +285,44 @@ impl Track {
 
     /// A start position and orientation on the tube floor.
     pub fn spawn(&self, lane_offset: f32) -> (Vec3, Quat) {
-        let f = &self.frames[0];
+        let f = &self.frames[self.start];
         // "Floor" is whichever side of the tube is furthest from world up.
         let down = pick_floor_direction(f);
         let right = f.tangent.cross(-down).normalize();
         let pos = f.pos + down * (f.radius - 1.6) + right * lane_offset;
         (pos, look_rotation(f.tangent, -down))
     }
+}
+
+/// Pick the start line: the flattest, straightest stretch on the loop. Frame 0
+/// is wherever the generator happened to begin, which can be mid-climb or on a
+/// crest, and then the track falls out of sight the moment you look at it.
+fn pick_start(frames: &[Frame]) -> usize {
+    let n = frames.len();
+    // Look far enough ahead that a short flat spot inside a bend does not win.
+    let lookahead = (40.0 / SAMPLE_SPACING) as usize;
+    let mut best = 0;
+    let mut best_score = f32::MAX;
+
+    for i in 0..n {
+        let here = &frames[i];
+        let mut gradient = 0.0f32;
+        let mut turn = 0.0f32;
+        for step in 0..lookahead {
+            let a = &frames[(i + step) % n];
+            let b = &frames[(i + step + 1) % n];
+            gradient += a.tangent.y.abs();
+            turn += 1.0 - a.tangent.dot(b.tangent).clamp(-1.0, 1.0);
+        }
+        // Climbing or diving is worse than turning: a bend still shows the road
+        // ahead, whereas a slope hides it entirely.
+        let score = gradient * 3.0 + turn * 40.0 + here.tangent.y.abs() * 6.0;
+        if score < best_score {
+            best_score = score;
+            best = i;
+        }
+    }
+    best
 }
 
 /// Direction from the centerline toward the part of the tube that reads as the
@@ -386,6 +431,32 @@ mod tests {
         // A rotation preserves handedness: X cross Y must equal Z, not -Z.
         let (x, y, z) = (rot * Vec3::X, rot * Vec3::Y, rot * Vec3::Z);
         assert!((x.cross(y) - z).length() < 1e-3, "basis is mirrored, not rotated");
+    }
+
+    /// The start line must be flat and straight. Starting on a slope makes the
+    /// track fall out of view, which reads as being perched on top of a hill
+    /// rather than standing on a road.
+    #[test]
+    fn start_line_is_flat_and_straight() {
+        for seed in [1u64, 7, 42, 1337, 99999] {
+            let track = Track::generate(seed);
+            let start = &track.frames[track.start];
+
+            let gradient = start.tangent.y.abs();
+            assert!(
+                gradient < 0.05,
+                "seed {seed}: start line is on a {:.0}% gradient",
+                gradient * 100.0
+            );
+
+            // And it should stay straight for a few car lengths ahead.
+            let n = track.frames.len();
+            let ahead = &track.frames[(track.start + 6) % n];
+            assert!(
+                start.tangent.dot(ahead.tangent) > 0.97,
+                "seed {seed}: start line is inside a bend"
+            );
+        }
     }
 
     #[test]
