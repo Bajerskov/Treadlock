@@ -88,6 +88,32 @@ mod tests {
     use super::*;
     use crate::vehicle::autopilot;
 
+    /// Pads have to be reachable by a car driving normally, and have to actually
+    /// add speed. A pad that is never hit, or hit without effect, is scenery.
+    #[test]
+    fn boost_pads_fire_and_add_speed() {
+        for seed in [1u64, 7, 42] {
+            let mut sim = Sim::new(seed);
+            assert!(sim.track.boost_pads.len() >= 8, "seed {seed}: too few pads");
+
+            let mut fired = 0usize;
+            let mut gained = 0.0f32;
+            for _ in 0..(90.0 / TICK_DT) as usize {
+                let controls = autopilot(&sim.track, &sim.player, 26.0);
+                let before = sim.player.speed();
+                sim.tick(&controls, TICK_DT);
+                if sim.player.pad_triggered {
+                    fired += 1;
+                }
+                if sim.player.pad_boost > 0.0 {
+                    gained += sim.player.speed() - before;
+                }
+            }
+            assert!(fired > 0, "seed {seed}: autopilot never hit a boost pad");
+            assert!(gained > 0.0, "seed {seed}: pads fired but added no speed");
+        }
+    }
+
     /// Every lap must contain both kinds of stretch, and the open ones must
     /// actually hold the car near the floor. If gravity there still followed the
     /// tube, the car could run the walls straight through them and the section

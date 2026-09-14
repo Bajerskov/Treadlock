@@ -33,6 +33,10 @@ const MAX_STEER: f32 = 0.55;
 /// Quadratic drag, tuned against ENGINE_FORCE to set terminal speed.
 const DRAG: f32 = 1.6;
 const DOWNFORCE: f32 = 1.6;
+/// Thrust from a boost pad, and how long it lasts. Well above engine force, so
+/// a pad is worth going out of your way for.
+const PAD_BOOST_FORCE: f32 = 42000.0;
+const PAD_BOOST_TIME: f32 = 1.0;
 
 #[derive(Clone, Copy, Default)]
 pub struct Controls {
@@ -57,6 +61,8 @@ pub struct Wheel {
     pub spin: f32,
     /// Accumulated rotation, for drawing the wheel turning.
     pub spin_angle: f32,
+    /// Sideways slip speed at the contact patch, m/s. Drives tyre smoke.
+    pub slip: f32,
 }
 
 impl Wheel {
@@ -70,6 +76,7 @@ impl Wheel {
             compression: 0.0,
             spin: 0.0,
             spin_angle: 0.0,
+            slip: 0.0,
         }
     }
 }
@@ -85,6 +92,11 @@ pub struct Vehicle {
     pub boost: f32,
     pub grounded: bool,
     pub contacts: u8,
+    /// Seconds of boost-pad thrust left. Held rather than applied as an impulse
+    /// so the kick is drivable instead of a one-frame jolt.
+    pub pad_boost: f32,
+    /// Set for one tick when a pad fires, for effects to pick up.
+    pub pad_triggered: bool,
     /// Arc length along the track, used for lap and placement logic.
     pub distance: f32,
 }
@@ -113,6 +125,8 @@ impl Vehicle {
             boost: 1.0,
             grounded: false,
             contacts: 0,
+            pad_boost: 0.0,
+            pad_triggered: false,
             distance: 0.0,
         }
     }
@@ -169,6 +183,18 @@ impl Vehicle {
         }
         force += body.down * (DOWNFORCE * speed * speed);
 
+        // Boost pads. Only count while the car is actually on the surface, so a
+        // pad cannot be collected by flying over it.
+        self.pad_triggered = false;
+        if self.grounded && track.boost_pad_at(self.pos).is_some() && self.pad_boost <= 0.0 {
+            self.pad_boost = PAD_BOOST_TIME;
+            self.pad_triggered = true;
+        }
+        if self.pad_boost > 0.0 {
+            self.pad_boost = (self.pad_boost - dt).max(0.0);
+            force += self.forward() * PAD_BOOST_FORCE;
+        }
+
         // Steering authority falls off with speed so the car is not twitchy flat out.
         let steer_scale = 1.0 - 0.55 * (speed / 120.0).clamp(0.0, 1.0);
         let steer_angle = controls.steer.clamp(-1.0, 1.0) * MAX_STEER * steer_scale;
@@ -187,6 +213,7 @@ impl Vehicle {
             if surf.gap >= max_reach {
                 self.wheels[i].contact = false;
                 self.wheels[i].compression = 0.0;
+                self.wheels[i].slip = 0.0;
                 // Freewheel, decaying slowly so the visual spin does not stop dead.
                 self.wheels[i].spin += -self.wheels[i].spin * 0.6 * dt;
                 continue;
@@ -229,6 +256,7 @@ impl Vehicle {
             let long_vel = point_vel.dot(fwd);
             let lat_vel = point_vel.dot(side);
             self.wheels[i].spin = long_vel / WHEEL_RADIUS;
+            self.wheels[i].slip = lat_vel.abs();
 
             // Handbrake breaks the rear end loose - that is the drift button.
             let lat_scale = if controls.handbrake && !wheel.steers { 0.22 } else { 1.0 };

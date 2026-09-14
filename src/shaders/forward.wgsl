@@ -105,7 +105,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var albedo = pc.tint.rgb;
     var emissive = vec3<f32>(0.0);
 
-    if (pc.params.x > 0.5) {
+    if (pc.params.x > 1.5) {
+        // Boost pad: chevrons racing forward along it, so it reads as a
+        // direction to take rather than just a bright patch of floor.
+        let travel = fract(in.uv.y * 3.0 - frame.sun.w * 2.5);
+        let across = abs(in.uv.x - 0.5) * 2.0;
+        let chevron = smoothstep(0.55, 0.95, 1.0 - abs(travel - across * 0.4 - 0.3) * 3.0);
+        let rim = smoothstep(0.86, 1.0, across);
+        emissive += (vec3<f32>(0.35, 1.5, 2.4) * chevron + vec3<f32>(0.2, 0.9, 1.6) * rim) * 2.0;
+        albedo *= 0.35;
+    } else if (pc.params.x > 0.5) {
         let blend = clamp(in.gravity_blend, 0.0, 1.0);
         let pattern = mix(road_pattern(in.uv, n), tube_pattern(in.uv), blend);
         emissive += pattern * (1.2 + pc.params.y);

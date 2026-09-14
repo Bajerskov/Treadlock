@@ -1,8 +1,10 @@
 mod camera;
+mod effects;
 mod gfx;
 mod input;
 mod mesh;
 mod model;
+mod particles;
 mod sim;
 mod track;
 mod vehicle;
@@ -87,8 +89,13 @@ fn main() {
     // Shader translation needs no GPU, so it can be checked on a build machine
     // that has no Vulkan driver at all.
     if std::env::args().any(|a| a == "--check-shaders") {
-        let spirv = gfx::shader::compile(include_str!("shaders/forward.wgsl"));
-        println!("forward.wgsl compiled: {} words of SPIR-V", spirv.len());
+        for (name, source) in [
+            ("forward.wgsl", include_str!("shaders/forward.wgsl")),
+            ("particles.wgsl", include_str!("shaders/particles.wgsl")),
+        ] {
+            let spirv = gfx::shader::compile(source);
+            println!("{name} compiled: {} words of SPIR-V", spirv.len());
+        }
         return;
     }
     // Loading and refitting a model needs no GPU either, so a file can be
@@ -181,6 +188,11 @@ fn run(args: Args) {
         None => GpuMesh::from_mesh(&mut ctx, "wheel", &mesh::wheel(0.62, 0.22, 16)),
     };
 
+    let (pad_vertices, pad_indices) = sim.track.boost_pad_mesh();
+    let mut pad_mesh = GpuMesh::upload(&mut ctx, "boost pads", &pad_vertices, &pad_indices);
+    println!("boost pads: {}", sim.track.boost_pads.len());
+
+    let mut particles = particles::Particles::new();
     let mut camera = Camera::new(&sim.player);
     camera.snap(&sim.player, &sim.track);
     let mut input = input::Input::new();
@@ -261,8 +273,19 @@ fn run(args: Args) {
 
                     let aspect =
                         swapchain.extent.width as f32 / swapchain.extent.height.max(1) as f32;
-                    let draws =
-                        build_draws(&sim, &track_mesh, &chassis_mesh, &wheel_mesh, show_wheels);
+                    let controls = input.controls();
+                    effects::update(&mut particles, &sim, dt, controls.throttle, controls.boost);
+                    let (right, up) = camera.basis();
+                    let particle_vertices = particles.build_vertices(right, up).to_vec();
+
+                    let draws = build_draws(
+                        &sim,
+                        &track_mesh,
+                        &chassis_mesh,
+                        &wheel_mesh,
+                        &pad_mesh,
+                        show_wheels,
+                    );
                     renderer.draw(
                         &mut ctx,
                         &swapchain,
@@ -270,6 +293,7 @@ fn run(args: Args) {
                         camera.pos,
                         sim.time,
                         &draws,
+                        &particle_vertices,
                     );
 
                     frames += 1;
@@ -294,6 +318,7 @@ fn run(args: Args) {
                     destroyed = true;
                     renderer.destroy(&mut ctx);
                     track_mesh.destroy(&mut ctx);
+                    pad_mesh.destroy(&mut ctx);
                     chassis_mesh.destroy(&mut ctx);
                     wheel_mesh.destroy(&mut ctx);
                     swapchain.destroy(&mut ctx);
@@ -309,6 +334,7 @@ fn build_draws<'a>(
     track_mesh: &'a GpuMesh,
     chassis_mesh: &'a GpuMesh,
     wheel_mesh: &'a GpuMesh,
+    pad_mesh: &'a GpuMesh,
     show_wheels: bool,
 ) -> Vec<Draw<'a>> {
     let mut draws = vec![Draw {
@@ -319,6 +345,17 @@ fn build_draws<'a>(
         emissive: 0.0,
         metallic: 0.35,
     }];
+
+    // Pads are their own mesh so they can glow without needing a per-vertex
+    // material on the tube. surface = 2 selects the pad shading.
+    draws.push(Draw {
+        mesh: pad_mesh,
+        model: Mat4::IDENTITY,
+        tint: Vec3::new(0.10, 0.45, 0.75),
+        surface: 2.0,
+        emissive: 1.0,
+        metallic: 0.5,
+    });
 
     let car = &sim.player;
     let body = Mat4::from_rotation_translation(car.rot, car.pos);

@@ -9,6 +9,7 @@ use super::context::Context;
 use super::shader;
 use super::swapchain::{color_range, Swapchain, DEPTH_FORMAT};
 use crate::mesh::Mesh;
+use crate::particles::{ParticleVertex, Particles, MAX_PARTICLES};
 use crate::track::Vertex;
 
 /// Frames recorded ahead of the GPU. Two keeps latency low, which matters more
@@ -64,6 +65,8 @@ struct Frame {
     in_flight: vk::Fence,
     uniform: Buffer,
     descriptor_set: vk::DescriptorSet,
+    /// Rebuilt every frame from the live particles, so it is host visible.
+    particle_vertices: Buffer,
 }
 
 /// One object to draw this frame.
@@ -82,6 +85,9 @@ pub struct Renderer {
     pipeline: vk::Pipeline,
     descriptor_pool: vk::DescriptorPool,
     descriptor_layout: vk::DescriptorSetLayout,
+    particle_pipeline: vk::Pipeline,
+    /// Quad indices for the whole pool, uploaded once and reused.
+    particle_indices: Buffer,
     frames: Vec<Frame>,
     frame_index: usize,
     /// Signalled by the swapchain when it no longer matches the window.
@@ -179,8 +185,17 @@ impl Renderer {
                     &[],
                 );
 
+                let particle_vertices = Buffer::new(
+                    ctx,
+                    "particle vertices",
+                    (MAX_PARTICLES * 4 * std::mem::size_of::<ParticleVertex>()) as vk::DeviceSize,
+                    vk::BufferUsageFlags::VERTEX_BUFFER,
+                    MemoryLocation::CpuToGpu,
+                );
+
                 frames.push(Frame {
                     command_buffer: command_buffers[i],
+                    particle_vertices,
                     image_available: ctx
                         .device
                         .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
@@ -201,7 +216,16 @@ impl Renderer {
                 });
             }
 
+            let particle_indices = Buffer::device_local(
+                ctx,
+                "particle indices",
+                &Particles::indices(),
+                vk::BufferUsageFlags::INDEX_BUFFER,
+            );
+
             Renderer {
+                particle_pipeline: build_particle_pipeline(ctx, swapchain, pipeline_layout),
+                particle_indices,
                 pipeline_layout,
                 pipeline,
                 descriptor_pool,
@@ -221,6 +245,7 @@ impl Renderer {
         camera_pos: Vec3,
         time: f32,
         draws: &[Draw],
+        particle_vertices: &[ParticleVertex],
     ) {
         unsafe {
             let frame = &mut self.frames[self.frame_index];
@@ -359,6 +384,45 @@ impl Renderer {
                 ctx.device.cmd_draw_indexed(cmd, d.mesh.count, 1, 0, 0, 0);
             }
 
+            // Particles last, so they blend over finished geometry.
+            if !particle_vertices.is_empty() {
+                let quads = (particle_vertices.len() / 4).min(MAX_PARTICLES);
+                frame
+                    .particle_vertices
+                    .write(bytemuck::cast_slice(&particle_vertices[..quads * 4]));
+
+                ctx.device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.particle_pipeline,
+                );
+                let push = Push {
+                    model: Mat4::IDENTITY,
+                    tint: Vec4::ONE,
+                    params: Vec4::ZERO,
+                };
+                ctx.device.cmd_push_constants(
+                    cmd,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    bytemuck::bytes_of(&push),
+                );
+                ctx.device.cmd_bind_vertex_buffers(
+                    cmd,
+                    0,
+                    &[frame.particle_vertices.handle],
+                    &[0],
+                );
+                ctx.device.cmd_bind_index_buffer(
+                    cmd,
+                    self.particle_indices.handle,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                ctx.device.cmd_draw_indexed(cmd, quads as u32 * 6, 1, 0, 0, 0);
+            }
+
             ctx.device.cmd_end_rendering(cmd);
             transition(
                 ctx,
@@ -408,8 +472,13 @@ impl Renderer {
     pub fn rebuild_pipeline(&mut self, ctx: &mut Context, swapchain: &Swapchain) {
         unsafe {
             ctx.device.device_wait_idle().ok();
+            // Both pipelines bake in the colour format, so both are rebuilt.
+            // The index buffer does not, and must survive.
             ctx.device.destroy_pipeline(self.pipeline, None);
+            ctx.device.destroy_pipeline(self.particle_pipeline, None);
             self.pipeline = build_pipeline(ctx, swapchain, self.pipeline_layout);
+            self.particle_pipeline =
+                build_particle_pipeline(ctx, swapchain, self.pipeline_layout);
         }
     }
 
@@ -421,12 +490,15 @@ impl Renderer {
                 ctx.device.destroy_semaphore(frame.render_finished, None);
                 ctx.device.destroy_fence(frame.in_flight, None);
                 frame.uniform.destroy(ctx);
+                frame.particle_vertices.destroy(ctx);
             }
             self.frames.clear();
             ctx.device.destroy_descriptor_pool(self.descriptor_pool, None);
             ctx.device
                 .destroy_descriptor_set_layout(self.descriptor_layout, None);
             ctx.device.destroy_pipeline(self.pipeline, None);
+            ctx.device.destroy_pipeline(self.particle_pipeline, None);
+            self.particle_indices.destroy(ctx);
             ctx.device.destroy_pipeline_layout(self.pipeline_layout, None);
         }
     }
@@ -530,6 +602,111 @@ unsafe fn build_pipeline(
         .device
         .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
         .expect("create graphics pipeline")[0];
+    ctx.device.destroy_shader_module(module, None);
+    pipeline
+}
+
+/// Particles share the frame uniform and pipeline layout but need their own
+/// vertex format, additive blending, and depth writes off: they are transparent,
+/// so writing depth would make them occlude each other in draw order.
+unsafe fn build_particle_pipeline(
+    ctx: &Context,
+    swapchain: &Swapchain,
+    layout: vk::PipelineLayout,
+) -> vk::Pipeline {
+    let spirv = shader::compile(include_str!("../shaders/particles.wgsl"));
+    let module = shader::module(ctx, &spirv);
+    let vs_name = c"vs_main";
+    let fs_name = c"fs_main";
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(vs_name),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(module)
+            .name(fs_name),
+    ];
+
+    let bindings = [vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(std::mem::size_of::<ParticleVertex>() as u32)
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let attributes = [
+        vk::VertexInputAttributeDescription::default()
+            .location(0)
+            .binding(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(0),
+        vk::VertexInputAttributeDescription::default()
+            .location(1)
+            .binding(0)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .offset(12),
+        vk::VertexInputAttributeDescription::default()
+            .location(2)
+            .binding(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(28),
+    ];
+
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&bindings)
+        .vertex_attribute_descriptions(&attributes);
+    let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let raster = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    // Tested against the scene so particles hide behind geometry, but not
+    // written, so they accumulate with each other in any order.
+    let depth = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_write_enable(false)
+        .depth_compare_op(vk::CompareOp::LESS);
+    let blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ZERO)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+        .alpha_blend_op(vk::BlendOp::ADD)];
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let color_formats = [swapchain.format];
+    let mut rendering = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&color_formats)
+        .depth_attachment_format(DEPTH_FORMAT);
+
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&assembly)
+        .viewport_state(&viewport)
+        .rasterization_state(&raster)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering);
+
+    let pipeline = ctx
+        .device
+        .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+        .expect("create particle pipeline")[0];
     ctx.device.destroy_shader_module(module, None);
     pipeline
 }

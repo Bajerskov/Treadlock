@@ -75,6 +75,13 @@ impl Camera {
         self.follow(v, track, 1.0);
     }
 
+    /// Screen-aligned right and up, for building billboards on the CPU.
+    pub fn basis(&self) -> (Vec3, Vec3) {
+        let forward = (self.target - self.pos).normalize_or(Vec3::NEG_Z);
+        let right = forward.cross(self.up).normalize_or(Vec3::X);
+        (right, right.cross(forward))
+    }
+
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
         let view = Mat4::look_at_rh(self.pos, self.target, self.up);
         let mut proj = Mat4::perspective_rh(self.fov, aspect, 0.25, 4000.0);

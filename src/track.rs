@@ -69,8 +69,23 @@ pub struct Surface {
     pub distance: f32,
 }
 
+/// A pad on the track surface that fires the car forward when driven over.
+#[derive(Clone, Copy)]
+pub struct BoostPad {
+    pub pos: Vec3,
+    /// Direction of travel it accelerates you along.
+    pub forward: Vec3,
+    /// Surface normal, pointing into the tube interior.
+    pub up: Vec3,
+    pub frame: usize,
+}
+
+/// How close the car has to pass to trigger a pad, in metres.
+pub const PAD_TRIGGER_RADIUS: f32 = 4.5;
+
 pub struct Track {
     pub frames: Vec<Frame>,
+    pub boost_pads: Vec<BoostPad>,
     pub length: f32,
     /// Frame holding the start line. Chosen for being flat and straight rather
     /// than being first: starting on a slope or a crest makes the track dive out
@@ -208,8 +223,9 @@ impl Track {
         let length = distance + (centers[0] - centers[n - 1]).length();
 
         let start = pick_start(&frames);
+        let boost_pads = place_boost_pads(&frames, start);
         let (vertices, indices) = build_mesh(&frames);
-        Track { frames, length, start, vertices, indices }
+        Track { frames, boost_pads, length, start, vertices, indices }
     }
 
     /// Nearest centerline frame to `pos`. `hint` is the previous result; the
@@ -325,6 +341,76 @@ impl Track {
         let right = f.tangent.cross(-down).normalize();
         let pos = f.pos + down * (f.radius - 1.6) + right * lane_offset;
         (pos, look_rotation(f.tangent, -down))
+    }
+}
+
+/// Lay boost pads along the floor at regular intervals, skipping the run up to
+/// the start line so a standing start is not launched before the flag.
+fn place_boost_pads(frames: &[Frame], start: usize) -> Vec<BoostPad> {
+    let n = frames.len();
+    // Spaced further apart than a boost lasts, or the next pad is reached
+    // before the last one expires and the "boost" becomes permanent thrust.
+    let spacing = (260.0 / SAMPLE_SPACING) as usize;
+    let clear_of_start = (60.0 / SAMPLE_SPACING) as usize;
+
+    let mut pads = Vec::new();
+    let mut i = clear_of_start;
+    while i < n - clear_of_start {
+        let index = (start + i) % n;
+        let f = &frames[index];
+        let floor = pick_floor_direction(f);
+        pads.push(BoostPad {
+            // Sit on the surface, not buried in it.
+            pos: f.pos + floor * (f.radius - 0.25),
+            forward: f.tangent,
+            up: -floor,
+            frame: index,
+        });
+        i += spacing;
+    }
+    pads
+}
+
+impl Track {
+    /// The pad the car is standing on, if any. There are only a few dozen pads,
+    /// so a linear scan costs less than maintaining an index would.
+    pub fn boost_pad_at(&self, pos: Vec3) -> Option<&BoostPad> {
+        self.boost_pads
+            .iter()
+            .find(|pad| pad.pos.distance_squared(pos) < PAD_TRIGGER_RADIUS * PAD_TRIGGER_RADIUS)
+    }
+
+    /// Flat arrow-shaped quads lying on the surface, drawn as their own mesh so
+    /// they can be shaded as emissive without a per-vertex material on the tube.
+    pub fn boost_pad_mesh(&self) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for pad in &self.boost_pads {
+            let right = pad.forward.cross(pad.up).normalize_or(Vec3::X);
+            let half_width = 3.2;
+            let half_length = 5.0;
+            let base = vertices.len() as u32;
+
+            // uv.y runs 0..1 along the pad so the shader can animate chevrons
+            // travelling down it.
+            let corners = [
+                (-half_width, -half_length, [0.0f32, 0.0f32]),
+                (half_width, -half_length, [1.0, 0.0]),
+                (half_width, half_length, [1.0, 1.0]),
+                (-half_width, half_length, [0.0, 1.0]),
+            ];
+            for (x, z, uv) in corners {
+                let p = pad.pos + right * x + pad.forward * z;
+                vertices.push(Vertex {
+                    pos: p.to_array(),
+                    normal: pad.up.to_array(),
+                    uv,
+                    gravity_blend: self.frames[pad.frame].gravity_blend,
+                });
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        (vertices, indices)
     }
 }
 
