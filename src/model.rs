@@ -10,12 +10,17 @@ use glam::{Mat4, Vec3};
 use crate::mesh::Mesh;
 use crate::track::Vertex;
 
-/// Target length of the car in metres, matching the physics chassis.
-const TARGET_LENGTH: f32 = 4.2;
-/// Widest the car may render, roughly the physics chassis plus its wheels.
-/// Fitting on length alone lets a stocky model spill well outside the body that
-/// is actually colliding, so whichever axis binds first wins.
-const TARGET_WIDTH: f32 = 2.5;
+/// Target length of the car in metres, taken from the physics chassis so art
+/// and collision cannot drift apart.
+const TARGET_LENGTH: f32 = crate::vehicle::HALF_EXTENTS.z * 2.0;
+/// Widest the car may render: the physics chassis plus a little for wheels
+/// standing proud of it. Fitting on length alone lets a stocky model spill well
+/// outside the body that is actually colliding, so whichever axis binds first
+/// wins.
+const TARGET_WIDTH: f32 = crate::vehicle::HALF_EXTENTS.x * 2.0 + 0.2;
+/// Below this ratio between the two horizontal axes, which one points forward
+/// is not decidable from the bounding box.
+const SQUARE_FOOTPRINT_RATIO: f32 = 1.15;
 
 /// How to orient and size a model that was not authored for this game.
 #[derive(Clone, Copy)]
@@ -105,6 +110,9 @@ impl Model {
         // often still faces sideways. That shows up as the wider horizontal axis
         // being X rather than Z.
         let oriented = bounds_of(parts[0]).size();
+        let longer = oriented.x.max(oriented.z);
+        let shorter = oriented.x.min(oriented.z).max(1e-3);
+        let square_footprint = longer / shorter < SQUARE_FOOTPRINT_RATIO;
         let auto_yaw = if oriented.x > oriented.z { 90.0f32 } else { 0.0 };
         if auto_yaw != 0.0 {
             let turn = Mat4::from_rotation_y(auto_yaw.to_radians());
@@ -136,11 +144,30 @@ impl Model {
             if auto_yaw != 0.0 { ", auto-yawed 90 deg" } else { "" },
             if wheel.is_some() { ", separate wheel mesh" } else { ", wheels fused into body" },
         );
-        if fitted.z < TARGET_LENGTH * 0.85 {
+        if square_footprint {
+            println!(
+                "  note: the footprint is nearly square ({:.2} x {:.2} m), so which axis points \
+                 forward cannot be told from the bounding box and the 90 degree turn above is a \
+                 guess. If the car drives sideways, add --car-yaw 90.",
+                oriented.x, oriented.z
+            );
+        }
+        // Width is the budget that keeps art aligned with collision, so say so
+        // loudly when a manual scale has pushed the model past it.
+        let chassis_width = crate::vehicle::HALF_EXTENTS.x * 2.0;
+        if fitted.x > TARGET_WIDTH * 1.02 {
+            println!(
+                "  warning: {:.2} m wide, past the {TARGET_WIDTH:.1} m budget and well past the \
+                 {chassis_width:.1} m physics chassis. Wheels will visibly overhang the car during \
+                 contact. Drop --car-scale to about {:.2} to stay within it.",
+                fitted.x,
+                fit.scale * TARGET_WIDTH / fitted.x.max(1e-3)
+            );
+        } else if fitted.z < TARGET_LENGTH * 0.85 {
             println!(
                 "  note: this model is stocky for a car, so matching the {TARGET_WIDTH:.1} m width \
-                 budget leaves it {:.2} m long against a {TARGET_LENGTH:.1} m chassis. \
-                 Pass --car-scale to override.",
+                 budget leaves it {:.2} m long against a {TARGET_LENGTH:.1} m chassis. Either \
+                 accept it, pass --car-scale, or widen HALF_EXTENTS so the physics matches the art.",
                 fitted.z
             );
         }
@@ -361,20 +388,34 @@ mod tests {
     /// overhangs the body that is actually colliding.
     #[test]
     fn stocky_model_is_limited_by_width_not_length() {
-        let dir = temp_dir("stocky");
-        // Facing along X, as generators often produce.
-        let path = write_fixture(&dir, "Car", Vec3::new(1.90, 0.53, 1.37));
-        let model = Model::load(&path, Fit::default()).expect("load");
+        // Both cases are measured from real generated cars, which come out far
+        // wider relative to their length than a road car and face along X.
+        for extents in [Vec3::new(1.90, 0.53, 1.37), Vec3::new(1.00, 0.31, 0.91)] {
+            let dir = temp_dir(&format!("stocky-{}", extents.x));
+            let path = write_fixture(&dir, "Car", extents);
+            let model = Model::load(&path, Fit::default()).expect("load");
 
-        let size = bounds_of(&model.chassis).size();
-        assert!(
-            size.x <= TARGET_WIDTH + 1e-3,
-            "fitted width {} exceeds the {TARGET_WIDTH} m budget",
-            size.x
-        );
-        // The auto-yaw should have turned its long axis down the track.
-        assert!(size.z > size.x, "long axis was not turned to face forward");
-        assert!(size.z <= TARGET_LENGTH + 1e-3);
+            let size = bounds_of(&model.chassis).size();
+            assert!(
+                size.x <= TARGET_WIDTH + 1e-3,
+                "{extents}: fitted width {} exceeds the {TARGET_WIDTH} m budget",
+                size.x
+            );
+            // The auto-yaw should have turned its long axis down the track.
+            assert!(size.z > size.x, "{extents}: long axis was not turned to face forward");
+            assert!(size.z <= TARGET_LENGTH + 1e-3);
+        }
+    }
+
+    /// A manual scale is an override, so it is allowed to exceed the width
+    /// budget - but the fit must not quietly clamp it, because the printed
+    /// warning is what tells the user their art will overhang the collision.
+    #[test]
+    fn manual_scale_may_exceed_the_width_budget() {
+        let dir = temp_dir("oversized");
+        let path = write_fixture(&dir, "Car", Vec3::new(1.00, 0.31, 0.91));
+        let model = Model::load(&path, Fit { scale: 1.5, ..Fit::default() }).expect("load");
+        assert!(bounds_of(&model.chassis).size().x > TARGET_WIDTH);
     }
 
     #[test]
