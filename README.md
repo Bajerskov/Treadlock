@@ -6,14 +6,14 @@ an AMD BC-250 board as a Steam-machine-style console but portable to any
 Vulkan 1.3 system.
 
 The handling model is aimed squarely at **Rollcage** (PS1, 1999): huge wheels,
-no upside down, absurd speed.
+flipping over never ends a race, absurd speed.
 
 ## Current state
 
 Playable vertical slice in progress.
 
 - [x] Procedural closed-loop tube tracks from a seed
-- [x] Rollcage-style vehicle physics, including inverted driving
+- [x] Rollcage-style vehicle physics with self-righting
 - [x] Fixed-timestep sim with lap timing
 - [x] Forward Vulkan renderer with chase camera
 - [x] Keyboard and gamepad input
@@ -113,13 +113,20 @@ because from the car's point of view it is never on a wall.
 Surface queries project onto the centerline rather than raycasting the mesh.
 That is far cheaper than tracing triangles and it cannot tunnel at speed.
 
-### Never upside down
+### Flipping never ends a race
+
+Driving the ceiling of a tube is not the same as being inverted: gravity already
+follows the tube, so the car's roof points at the tube axis the whole way round.
+What a flip means is the chassis rolling relative to that surface, and it is
+always recoverable.
 
 The wheels sit on the chassis mid-plane and are taller than the body is thick,
-so the car meets the track from either side. Landing on the roof is a valid way
-to drive, not a state to recover from. The chassis settles toward whichever of
-the two flat orientations is closer, and the steering axis flips with it so
-"left" still means left on screen.
+so a flipped car still has traction and can keep driving while it rights itself.
+The righting torque targets wheels-down and ramps quadratically with how
+inverted the car is: negligible in normal driving, decisive past ninety degrees.
+A constant torque cannot do this, because an inverted car rests on its wheels
+and the suspension resists being rolled back. Steering flips sign with the car
+so "left" still means left on screen during the recovery.
 
 ## Target hardware
 
