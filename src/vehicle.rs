@@ -1,10 +1,11 @@
 //! Rollcage-style vehicle physics.
 //!
-//! The defining trick of Rollcage is that a car is never "upside down" - it has
-//! huge wheels on both sides and drives equally well on the floor, the walls and
-//! the ceiling. We get that for free by taking gravity from the track: inside a
-//! tube, down is always the radial direction into the nearest wall. There is no
-//! flip-over state and no righting mechanic, because there is nothing to right.
+//! The defining trick of Rollcage is that being flipped never ends a race. We
+//! get most of that for free by taking gravity from the track: inside a tube,
+//! down is always the radial direction into the nearest wall, so driving the
+//! walls and ceiling needs no special case - the roof still points at the tube
+//! axis all the way round. On top of that, a righting torque returns the car to
+//! its wheels after a bad landing.
 
 use glam::{Mat3, Quat, Vec3};
 
@@ -99,8 +100,8 @@ impl Vehicle {
             ang_vel: Vec3::ZERO,
             // Forward is -Z, so the front axle sits at negative z. Wheels sit on
             // the chassis mid-plane rather than slung underneath: they are taller
-            // than the body is thick, so they meet the track from either side.
-            // That symmetry is what makes upside-down driving work.
+            // than the body is thick, so a flipped car still has traction and can
+            // drive while the righting torque rolls it back onto its wheels.
             wheels: [
                 Wheel::new(Vec3::new(-x, 0.0, -z), true, false),
                 Wheel::new(Vec3::new(x, 0.0, -z), true, false),
@@ -251,19 +252,29 @@ impl Vehicle {
         self.grounded = contacts > 0;
         self.contacts = contacts as u8;
 
-        // Settle the chassis flat against the wall. The car is symmetric, so we
-        // align to whichever of the two flat orientations is closer instead of
-        // insisting on one "up" - landing inverted is a valid way to drive, not
-        // a state to recover from.
+        // Settle the chassis wheels-down against the wall. Driving the ceiling of
+        // the tube is not the same as being inverted: gravity already follows the
+        // tube, so the roof still points at the tube axis all the way round. What
+        // this torque provides is the Rollcage guarantee that flipping over never
+        // ends a race - the car always rights itself.
         let up = self.up();
-        let target_up = if up.dot(body.down) > 0.0 { body.down } else { -body.down };
+        let target_up = -body.down;
         // `cross` alone gives sin(angle), which collapses to zero at both 0 and
         // 180 degrees; scaling a normalised axis by the true angle keeps the
         // restoring torque meaningful right up to fully inverted.
         let cross = up.cross(target_up);
         let axis = cross.normalize_or(self.forward());
         let angle = up.dot(target_up).clamp(-1.0, 1.0).acos();
-        let align_strength = if self.grounded { 3.0 } else { 14.0 };
+        // An inverted car rests on its wheels and the suspension resists being
+        // rolled back, so a constant torque either fights normal driving or is
+        // too weak to recover. Ramp it quadratically instead: barely present
+        // while upright, overwhelming once past ninety degrees.
+        let inversion = (angle / std::f32::consts::PI).clamp(0.0, 1.0);
+        let align_strength = if self.grounded {
+            4.0 + 30.0 * inversion * inversion
+        } else {
+            16.0
+        };
         torque += axis * (angle * align_strength * MASS);
 
         if !self.grounded {
@@ -272,7 +283,9 @@ impl Vehicle {
             torque += self.right() * ((controls.brake - controls.throttle) * 6.0 * MASS);
         } else {
             // A little direct yaw makes turn-in feel arcade-sharp rather than simulation-heavy.
-            torque += target_up * (steer_angle * speed.min(90.0) * 90.0);
+            // Yaw about the car's own up so turn-in matches the driver's view even
+            // during the moment it spends inverted after a bad landing.
+            torque += self.up() * (steer_angle * speed.min(90.0) * 90.0);
         }
 
         // Angular damping, stronger in the air to avoid endless spin.

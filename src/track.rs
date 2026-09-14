@@ -292,8 +292,11 @@ fn pick_floor_direction(f: &Frame) -> Vec3 {
 /// the object transform we want here.
 pub fn look_rotation(forward: Vec3, up: Vec3) -> Quat {
     let f = forward.normalize();
-    let r = up.cross(f).normalize_or(Vec3::X);
-    let u = f.cross(r);
+    // Right-handed: right = forward x up. Taking the cross the other way round
+    // yields a basis with determinant -1, and `Quat::from_mat3` silently returns
+    // a garbage orientation for a mirror rather than a rotation.
+    let r = f.cross(up).normalize_or(Vec3::X);
+    let u = r.cross(f);
     Quat::from_mat3(&Mat3::from_cols(r, u, -f))
 }
 
@@ -365,4 +368,40 @@ fn build_mesh(frames: &[Frame]) -> (Vec<Vertex>, Vec<u32>) {
         }
     }
     (vertices, indices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn look_rotation_is_a_proper_rotation() {
+        let forward = Vec3::new(0.3, -0.2, 0.9).normalize();
+        let up = Vec3::new(0.1, 0.95, 0.2).normalize();
+        let rot = look_rotation(forward, up);
+
+        assert!((rot * Vec3::NEG_Z - forward).length() < 1e-3, "-Z must map to forward");
+        assert!((rot * Vec3::Y).dot(up) > 0.9, "+Y must point roughly at up");
+
+        // A rotation preserves handedness: X cross Y must equal Z, not -Z.
+        let (x, y, z) = (rot * Vec3::X, rot * Vec3::Y, rot * Vec3::Z);
+        assert!((x.cross(y) - z).length() < 1e-3, "basis is mirrored, not rotated");
+    }
+
+    #[test]
+    fn spawn_sits_inside_the_tube_facing_along_it() {
+        let track = Track::generate(7);
+        let (pos, rot) = track.spawn(0.0);
+        let surf = track.surface(pos, 0);
+
+        assert!(surf.gap > 0.0, "spawn is outside the tube wall");
+        assert!(
+            (rot * Vec3::Y).dot(-surf.down) > 0.9,
+            "car's roof must point into the tube, not through the wall"
+        );
+        assert!(
+            (rot * Vec3::NEG_Z).dot(surf.tangent).abs() > 0.9,
+            "car must face along the track"
+        );
+    }
 }

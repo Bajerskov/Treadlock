@@ -82,3 +82,48 @@ impl Sim {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vehicle::autopilot;
+
+    /// Drive each seed on autopilot and check the car behaves. This guards the
+    /// two failures that have actually happened: a mirrored spawn rotation, and
+    /// a righting torque too weak to beat the suspension holding a flipped car
+    /// on its wheels.
+    #[test]
+    fn autopilot_laps_without_getting_stuck_inverted() {
+        for seed in [1u64, 7, 42, 1337, 99999] {
+            let mut sim = Sim::new(seed);
+            let ticks = (60.0 / TICK_DT) as usize;
+            let mut inverted = 0usize;
+            let mut escaped = 0usize;
+
+            for _ in 0..ticks {
+                let controls = autopilot(&sim.track, &sim.player, 26.0);
+                sim.tick(&controls, TICK_DT);
+
+                assert!(
+                    sim.player.pos.is_finite() && sim.player.speed().is_finite(),
+                    "seed {seed}: simulation diverged"
+                );
+                let surf = sim.track.surface(sim.player.pos, sim.player.hint);
+                if surf.gap < -1.0 {
+                    escaped += 1;
+                }
+                if sim.player.up().dot(-surf.down) < 0.0 {
+                    inverted += 1;
+                }
+            }
+
+            assert_eq!(escaped, 0, "seed {seed}: car left the tube");
+            assert!(sim.lap >= 1, "seed {seed}: no lap completed in 60s");
+            let inverted_pct = inverted as f32 / ticks as f32 * 100.0;
+            assert!(
+                inverted_pct < 20.0,
+                "seed {seed}: inverted {inverted_pct:.1}% of the time, righting is too weak"
+            );
+        }
+    }
+}

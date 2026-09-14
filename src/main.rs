@@ -131,7 +131,10 @@ fn run(args: Args) {
                             KeyCode::KeyD | KeyCode::ArrowRight => input.keys.right = pressed,
                             KeyCode::ShiftLeft => input.keys.boost = pressed,
                             KeyCode::Space => input.keys.handbrake = pressed,
-                            KeyCode::KeyR if pressed => sim.player.respawn(&sim.track),
+                            KeyCode::KeyR if pressed => {
+                                sim.player.respawn(&sim.track);
+                                camera.snap(&sim.player, &sim.track);
+                            }
                             _ => {}
                         }
                     }
@@ -144,9 +147,10 @@ fn run(args: Args) {
                     input.poll();
                     if input.take_respawn() {
                         sim.player.respawn(&sim.track);
+                        camera.snap(&sim.player, &sim.track);
                     }
                     sim.update(&input.controls(), dt);
-                    camera.follow(&sim.player, dt);
+                    camera.follow(&sim.player, &sim.track, dt);
 
                     if renderer.needs_resize {
                         let size = window.inner_size();
@@ -260,6 +264,7 @@ fn headless(seed: u64, seconds: f32, trace: bool) {
     let mut speed_sum = 0.0f64;
     let mut airborne_ticks = 0usize;
     let mut escaped = 0usize;
+    let mut inverted_ticks = 0usize;
 
     for tick in 0..ticks {
         let controls = vehicle::autopilot(&sim.track, &sim.player, 26.0);
@@ -279,6 +284,10 @@ fn headless(seed: u64, seconds: f32, trace: bool) {
         // Outside the tube wall by more than a chassis is a containment failure.
         if surf.gap < -1.0 {
             escaped += 1;
+        }
+        // Roof pointing into the wall rather than at the tube axis.
+        if sim.player.up().dot(-surf.down) < 0.0 {
+            inverted_ticks += 1;
         }
 
         if trace && tick % sim::TICK_RATE as usize == 0 {
@@ -303,6 +312,10 @@ fn headless(seed: u64, seconds: f32, trace: bool) {
         top_speed * 3.6,
         airborne_ticks as f32 / ticks as f32 * 100.0,
         escaped
+    );
+    println!(
+        "inverted {:.1}% of the time",
+        inverted_ticks as f32 / ticks as f32 * 100.0
     );
     if sim.best_lap_time.is_finite() {
         println!("best lap {:.2}s", sim.best_lap_time);
