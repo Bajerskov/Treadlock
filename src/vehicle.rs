@@ -157,8 +157,11 @@ impl Vehicle {
         let mut force = Vec3::ZERO;
         let mut torque = Vec3::ZERO;
 
-        // Gravity follows the tube, which is what allows wall and ceiling driving.
-        force += body.down * (GRAVITY * MASS);
+        // In a tube stretch gravity follows the wall, which is what allows wall
+        // and ceiling driving. In an open stretch it points at the world floor
+        // instead, so the car is pinned to the bottom and has to take corners on
+        // the banking.
+        force += body.gravity * (GRAVITY * MASS);
 
         let speed = self.vel.length();
         if speed > 0.01 {

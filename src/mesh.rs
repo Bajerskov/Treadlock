@@ -16,7 +16,7 @@ impl Mesh {
         let normal = (b - a).cross(d - a).normalize_or(Vec3::Y);
         let base = self.vertices.len() as u32;
         for (p, uv) in [(a, [0.0, 0.0]), (b, [uv_scale, 0.0]), (c, [uv_scale, uv_scale]), (d, [0.0, uv_scale])] {
-            self.vertices.push(Vertex { pos: p.to_array(), normal: normal.to_array(), uv });
+            self.vertices.push(Vertex { pos: p.to_array(), normal: normal.to_array(), uv, gravity_blend: 0.0 });
         }
         self.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -91,6 +91,7 @@ pub fn wheel(radius: f32, half_width: f32, segments: usize) -> Mesh {
                     pos: p.to_array(),
                     normal: normal.to_array(),
                     uv: [0.5, 0.5],
+                    gravity_blend: 0.0,
                 });
             }
             if x > 0.0 {

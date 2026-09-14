@@ -472,6 +472,11 @@ unsafe fn build_pipeline(
             .binding(0)
             .format(vk::Format::R32G32_SFLOAT)
             .offset(24),
+        vk::VertexInputAttributeDescription::default()
+            .location(3)
+            .binding(0)
+            .format(vk::Format::R32_SFLOAT)
+            .offset(32),
     ];
 
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()

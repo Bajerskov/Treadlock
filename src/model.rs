@@ -277,6 +277,8 @@ fn read_primitive(
                 pos: pos.to_array(),
                 normal: normal.to_array(),
                 uv: uvs.as_ref().map(|u| u[i]).unwrap_or([0.0, 0.0]),
+                // Only track surfaces carry a gravity zone.
+                gravity_blend: 0.0,
             }
         })
         .collect();

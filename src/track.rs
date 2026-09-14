@@ -13,6 +13,8 @@ pub const RING_SEGMENTS: usize = 28;
 const SAMPLE_SPACING: f32 = 6.0;
 /// Control points in the generating loop.
 const CONTROL_POINTS: usize = 16;
+/// How many open, world-gravity stretches there are per lap. The rest is tube.
+const OPEN_ZONES: usize = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -20,6 +22,9 @@ pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    /// 1 where gravity follows the tube, 0 where it points at the world floor.
+    /// Carried on the vertex so the surface can be shaded to say which it is.
+    pub gravity_blend: f32,
 }
 
 /// A rotation-minimizing frame on the centerline.
@@ -32,6 +37,10 @@ pub struct Frame {
     pub radius: f32,
     /// Distance along the centerline from the start of the loop.
     pub distance: f32,
+    /// 1 = gravity follows the tube, so every surface is drivable. 0 = gravity
+    /// points at the world floor, so the car is pinned to the bottom and a
+    /// corner has to be taken on the banking.
+    pub gravity_blend: f32,
 }
 
 /// The result of locating a world position relative to the tube surface.
@@ -41,9 +50,15 @@ pub struct Surface {
     pub index: usize,
     /// Closest point on the centerline.
     pub center: Vec3,
-    /// Unit radial direction from the centerline to the query point. This is
-    /// local "down" - it points into the tube wall.
+    /// Unit radial direction from the centerline to the query point: the
+    /// surface normal, pointing into the tube wall. Suspension and tyres work
+    /// against this, whatever gravity happens to be doing.
     pub down: Vec3,
+    /// Direction gravity pulls here, blended between the world floor and the
+    /// tube wall. Deliberately not normalised: where the two oppose they
+    /// cancel, and a moment of low gravity is a better answer than a
+    /// discontinuity.
+    pub gravity: Vec3,
     /// Direction of travel along the centerline at `center`.
     pub tangent: Vec3,
     /// Tube radius at `center`.
@@ -171,6 +186,13 @@ impl Track {
             // sections give room to fight for a line.
             let phase = i as f32 / n as f32 * std::f32::consts::TAU;
             let radius = 30.0 + 6.0 * (phase * 3.0).sin() + 3.5 * (phase * 7.0).cos();
+            // Alternate between full tube and open road, so a lap has a rhythm
+            // rather than one continuous pipe: stretches where the walls and
+            // ceiling are yours, and stretches where gravity pins you to the
+            // floor and a corner has to be carried on the banking.
+            let zone = (phase * OPEN_ZONES as f32).sin();
+            let gravity_blend = smoothstep(-0.35, 0.35, zone);
+
             let tangent = tangents[i];
             let normal = normals[i];
             frames.push(Frame {
@@ -180,6 +202,7 @@ impl Track {
                 binormal: tangent.cross(normal).normalize(),
                 radius,
                 distance,
+                gravity_blend,
             });
         }
         let length = distance + (centers[0] - centers[n - 1]).length();
@@ -245,7 +268,14 @@ impl Track {
 
         // Project onto the two segments touching the nearest frame and keep the
         // better one, so the result is smooth across frame boundaries.
-        let mut best = (f32::MAX, self.frames[i].pos, self.frames[i].tangent, self.frames[i].radius, self.frames[i].distance);
+        let mut best = (
+            f32::MAX,
+            self.frames[i].pos,
+            self.frames[i].tangent,
+            self.frames[i].radius,
+            self.frames[i].distance,
+            self.frames[i].gravity_blend,
+        );
         for (a, b) in [((i + n - 1) % n, i), (i, (i + 1) % n)] {
             let fa = &self.frames[a];
             let fb = &self.frames[b];
@@ -263,11 +293,12 @@ impl Track {
                 let radius = fa.radius + (fb.radius - fa.radius) * t;
                 // `fb.distance` wraps to 0 at the seam; use arc length instead.
                 let span = if b == 0 { self.length - fa.distance } else { fb.distance - fa.distance };
-                best = (d, center, tangent, radius, fa.distance + span * t);
+                let blend = fa.gravity_blend + (fb.gravity_blend - fa.gravity_blend) * t;
+                best = (d, center, tangent, radius, fa.distance + span * t, blend);
             }
         }
 
-        let (dist_sq, center, tangent, radius, distance) = best;
+        let (dist_sq, center, tangent, radius, distance, gravity_blend) = best;
         let radial = pos - center;
         // Exactly on the axis has no defined radial direction; any perpendicular
         // will do and the car is 30m from a wall anyway.
@@ -276,6 +307,9 @@ impl Track {
             index: i,
             center,
             down,
+            // In an open stretch this is world down wherever you are, so the
+            // walls stop being drivable and the car is held on the floor.
+            gravity: Vec3::NEG_Y.lerp(down, gravity_blend),
             tangent,
             radius,
             gap: radius - dist_sq.sqrt(),
@@ -345,6 +379,12 @@ pub fn look_rotation(forward: Vec3, up: Vec3) -> Quat {
     Quat::from_mat3(&Mat3::from_cols(r, u, -f))
 }
 
+/// Smooth 0..1 ramp, for blending between gravity zones without a seam.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 fn signed_angle(from: Vec3, to: Vec3, axis: Vec3) -> f32 {
     let dot = from.dot(to).clamp(-1.0, 1.0);
     let angle = dot.acos();
@@ -396,6 +436,7 @@ fn build_mesh(frames: &[Frame]) -> (Vec<Vertex>, Vec<u32>) {
                 // Surfaces face the inside of the tube, where the cars are.
                 normal: (-radial).to_array(),
                 uv: [s as f32 / RING_SEGMENTS as f32, f.distance],
+                gravity_blend: f.gravity_blend,
             });
         }
     }

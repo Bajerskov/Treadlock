@@ -27,6 +27,7 @@ struct VsOut {
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) gravity_blend: f32,
 };
 
 @vertex
@@ -34,6 +35,7 @@ fn vs_main(
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) gravity_blend: f32,
 ) -> VsOut {
     var out: VsOut;
     let world = pc.model * vec4<f32>(pos, 1.0);
@@ -41,30 +43,54 @@ fn vs_main(
     // Uniform scale only, so the model matrix is safe for normals.
     out.normal = (pc.model * vec4<f32>(normal, 0.0)).xyz;
     out.uv = uv;
+    out.gravity_blend = gravity_blend;
     out.clip = frame.view_proj * world;
     return out;
 }
 
-// Lane markings and edge glow, derived from the tube's ring/arc-length UVs.
-fn track_pattern(uv: vec2<f32>) -> vec3<f32> {
-    // uv.x runs around the ring, uv.y is metres along the track.
+// Markings for a tube stretch: rings all the way round, because every surface
+// is drivable and the player needs to read rotation as well as speed.
+fn tube_pattern(uv: vec2<f32>) -> vec3<f32> {
     let ring = fract(uv.x);
     let along = uv.y;
 
-    // Dashed centre line down the middle of the floor.
     let centre = 1.0 - smoothstep(0.0, 0.012, abs(ring - 0.5));
     let dash = step(0.5, fract(along * 0.08));
     var glow = vec3<f32>(0.15, 0.85, 1.0) * centre * dash;
 
-    // Continuous strips up the walls, which give a strong sense of speed.
     let strip_a = 1.0 - smoothstep(0.0, 0.010, abs(ring - 0.25));
     let strip_b = 1.0 - smoothstep(0.0, 0.010, abs(ring - 0.75));
     glow += vec3<f32>(1.0, 0.35, 0.1) * (strip_a + strip_b);
 
-    // Rungs across the tube, spaced in metres, to read closing speed.
     let rung = 1.0 - smoothstep(0.0, 0.06, abs(fract(along * 0.04) - 0.5));
     glow += vec3<f32>(0.3, 0.4, 0.9) * rung * 0.35;
+    return glow;
+}
 
+// Markings for an open stretch: a road along the floor with edge lines where
+// the drivable surface runs out, so it reads as a carriageway rather than a
+// pipe. Gravity holds the car below those lines.
+fn road_pattern(uv: vec2<f32>, n: vec3<f32>) -> vec3<f32> {
+    let ring = fract(uv.x);
+    let along = uv.y;
+
+    // The floor is where the surface normal points up.
+    let floorness = clamp(n.y, 0.0, 1.0);
+
+    let centre = 1.0 - smoothstep(0.0, 0.010, abs(ring - 0.5));
+    let dash = step(0.45, fract(along * 0.12));
+    var glow = vec3<f32>(1.0, 0.85, 0.3) * centre * dash * floorness;
+
+    // Edge lines mark the limit of the flat road, at the point where the tube
+    // wall starts to rise away.
+    let edge_a = 1.0 - smoothstep(0.0, 0.014, abs(ring - 0.36));
+    let edge_b = 1.0 - smoothstep(0.0, 0.014, abs(ring - 0.64));
+    glow += vec3<f32>(1.0, 0.55, 0.15) * (edge_a + edge_b);
+
+    // Chevrons on the banking above the edge lines, warning it is a wall now.
+    let banking = smoothstep(0.30, 0.10, abs(ring - 0.5) * -1.0 + 0.5);
+    let chevron = step(0.7, fract(along * 0.05 + abs(ring - 0.5) * 2.0));
+    glow += vec3<f32>(0.9, 0.2, 0.1) * chevron * banking * 0.25;
     return glow;
 }
 
@@ -80,10 +106,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var emissive = vec3<f32>(0.0);
 
     if (pc.params.x > 0.5) {
-        let pattern = track_pattern(in.uv);
+        let blend = clamp(in.gravity_blend, 0.0, 1.0);
+        let pattern = mix(road_pattern(in.uv, n), tube_pattern(in.uv), blend);
         emissive += pattern * (1.2 + pc.params.y);
-        // Darken the base surface where markings sit so they read as light.
         albedo = mix(albedo, albedo * 0.55, clamp(length(pattern), 0.0, 1.0));
+        // Open stretches read warmer, tube stretches colder, so the change in
+        // gravity is visible from a distance rather than felt by surprise.
+        albedo *= mix(vec3<f32>(1.15, 1.02, 0.85), vec3<f32>(0.9, 0.96, 1.15), blend);
     }
 
     // Half-Lambert keeps unlit faces readable rather than crushing them to black,

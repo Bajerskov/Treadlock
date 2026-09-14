@@ -88,6 +88,39 @@ mod tests {
     use super::*;
     use crate::vehicle::autopilot;
 
+    /// Every lap must contain both kinds of stretch, and the open ones must
+    /// actually hold the car near the floor. If gravity there still followed the
+    /// tube, the car could run the walls straight through them and the section
+    /// would be pointless.
+    #[test]
+    fn open_stretches_pin_the_car_to_the_floor() {
+        let track = Track::generate(7);
+        let open = track.frames.iter().filter(|f| f.gravity_blend < 0.1).count();
+        let tube = track.frames.iter().filter(|f| f.gravity_blend > 0.9).count();
+        assert!(open > 20 && tube > 20, "expected both zone types, got {open} open / {tube} tube");
+
+        let mut sim = Sim::new(7);
+        let mut samples = 0usize;
+        let mut on_floor = 0usize;
+        for _ in 0..(120.0 / TICK_DT) as usize {
+            let controls = autopilot(&sim.track, &sim.player, 26.0);
+            sim.tick(&controls, TICK_DT);
+
+            let surf = sim.track.surface(sim.player.pos, sim.player.hint);
+            if surf.gravity.length() > 0.5 && sim.track.frames[surf.index].gravity_blend < 0.1 {
+                samples += 1;
+                // In an open stretch the outward direction at the car should be
+                // world down, i.e. the car is on the bottom of the tube.
+                if surf.down.dot(glam::Vec3::NEG_Y) > 0.5 {
+                    on_floor += 1;
+                }
+            }
+        }
+        assert!(samples > 100, "autopilot never reached an open stretch");
+        let ratio = on_floor as f32 / samples as f32;
+        assert!(ratio > 0.8, "car was only on the floor {:.0}% of an open stretch", ratio * 100.0);
+    }
+
     /// Drive each seed on autopilot and check the car behaves. This guards the
     /// two failures that have actually happened: a mirrored spawn rotation, and
     /// a righting torque too weak to beat the suspension holding a flipped car
