@@ -114,6 +114,38 @@ impl Default for Pad {
     }
 }
 
+/// Mix levels, 0 to 1, exactly as the mixer uses them.
+///
+/// These are the real bus levels rather than a percentage of some hidden
+/// tuned value, so what the menu shows is what the mixer gets. The defaults
+/// are the balance the game was tuned at, which is why they are not all 1.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Audio {
+    pub master: f32,
+    /// Engines, the player's and everyone else's.
+    pub engine: f32,
+    /// Tyres, impacts, weapons, pickups.
+    pub effects: f32,
+    /// Wind and the tunnel tone.
+    pub ambient: f32,
+    pub music: f32,
+    /// Silences everything without losing the balance behind it.
+    pub muted: bool,
+}
+
+impl Default for Audio {
+    fn default() -> Audio {
+        Audio {
+            master: 0.8,
+            engine: 0.55,
+            effects: 0.7,
+            ambient: 0.4,
+            music: 0.35,
+            muted: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Race {
     pub opponents: usize,
@@ -136,6 +168,7 @@ pub const MAX_OPPONENTS: usize = 9;
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Settings {
     pub video: Video,
+    pub audio: Audio,
     pub pad: Pad,
     pub race: Race,
 }
@@ -179,6 +212,12 @@ impl Settings {
                 "particles" => s.video.particles = value.parse().unwrap_or(s.video.particles),
                 "skid_marks" => s.video.skid_marks = flag(value),
                 "scenery" => s.video.scenery = flag(value),
+                "volume_master" => s.audio.master = value.parse().unwrap_or(s.audio.master),
+                "volume_engine" => s.audio.engine = value.parse().unwrap_or(s.audio.engine),
+                "volume_effects" => s.audio.effects = value.parse().unwrap_or(s.audio.effects),
+                "volume_ambient" => s.audio.ambient = value.parse().unwrap_or(s.audio.ambient),
+                "volume_music" => s.audio.music = value.parse().unwrap_or(s.audio.music),
+                "muted" => s.audio.muted = flag(value),
                 "deadzone" => s.pad.deadzone = value.parse().unwrap_or(s.pad.deadzone),
                 "steer_sensitivity" => {
                     s.pad.steer_sensitivity = value.parse().unwrap_or(s.pad.steer_sensitivity)
@@ -205,6 +244,15 @@ impl Settings {
     pub fn clamped(mut self) -> Settings {
         self.video.fov = self.video.fov.clamp(50.0, 110.0);
         self.video.particles = self.video.particles.clamp(0.0, 1.0);
+        for level in [
+            &mut self.audio.master,
+            &mut self.audio.engine,
+            &mut self.audio.effects,
+            &mut self.audio.ambient,
+            &mut self.audio.music,
+        ] {
+            *level = level.clamp(0.0, 1.0);
+        }
         self.pad.deadzone = self.pad.deadzone.clamp(0.0, 0.45);
         self.pad.steer_sensitivity = self.pad.steer_sensitivity.clamp(0.4, 2.0);
         self.pad.steer_curve = self.pad.steer_curve.clamp(1.0, 3.0);
@@ -223,6 +271,13 @@ impl Settings {
              particles          {:.2}\n\
              skid_marks         {}\n\
              scenery            {}\n\
+             \n# audio   levels the mixer uses directly, 0 to 1\n\
+             volume_master      {:.2}\n\
+             volume_engine      {:.2}\n\
+             volume_effects     {:.2}\n\
+             volume_ambient     {:.2}\n\
+             volume_music       {:.2}\n\
+             muted              {}\n\
              \n# controller\n\
              deadzone           {:.2}\n\
              steer_sensitivity  {:.2}\n\
@@ -240,6 +295,12 @@ impl Settings {
             self.video.particles,
             flag(self.video.skid_marks),
             flag(self.video.scenery),
+            self.audio.master,
+            self.audio.engine,
+            self.audio.effects,
+            self.audio.ambient,
+            self.audio.music,
+            flag(self.audio.muted),
             self.pad.deadzone,
             self.pad.steer_sensitivity,
             self.pad.steer_curve,
@@ -285,6 +346,14 @@ mod tests {
                 particles: 0.25,
                 skid_marks: false,
                 scenery: false,
+            },
+            audio: Audio {
+                master: 0.5,
+                engine: 0.2,
+                effects: 0.9,
+                ambient: 0.0,
+                music: 1.0,
+                muted: true,
             },
             pad: Pad {
                 deadzone: 0.3,
@@ -345,12 +414,14 @@ mod tests {
              particles 90\n\
              deadzone -3\n\
              steer_sensitivity 99\n\
-             opponents 500\n",
+             opponents 500\n\
+             volume_master 40\n",
         );
         assert!((50.0..=110.0).contains(&loaded.video.fov), "fov {} escaped", loaded.video.fov);
         assert!((0.0..=1.0).contains(&loaded.video.particles));
         assert!((0.0..=0.45).contains(&loaded.pad.deadzone));
         assert!((0.4..=2.0).contains(&loaded.pad.steer_sensitivity));
+        assert!((0.0..=1.0).contains(&loaded.audio.master), "volume {} escaped", loaded.audio.master);
         assert!(loaded.race.opponents <= MAX_OPPONENTS);
     }
 

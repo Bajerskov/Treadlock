@@ -498,6 +498,10 @@ fn run(args: Args) {
                     camera.base_fov = menu.settings.video.fov.to_radians();
                     cues.poll(&sim, &audio, dt);
                     audio.update(audio::observe(&sim, &camera, controls.throttle));
+                    // Pushed every frame rather than on change: it is a lock
+                    // and five floats, and it means a level edited in the menu
+                    // is audible while the slider is still moving.
+                    audio.set_levels(menu.settings.audio.into());
 
                     if renderer.needs_resize {
                         let size = window.inner_size();

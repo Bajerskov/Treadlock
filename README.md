@@ -111,6 +111,21 @@ Nothing in the menus is decoration. Every setting listed changes something:
 | Skid marks | The decal pass |
 | Scenery | The skyline and sky, and their two draws |
 
+| Audio | |
+| --- | --- |
+| Master | Everything at once |
+| Engines | Your car and every car around you |
+| Effects | Tyres, impacts, weapons, pickups |
+| Ambience | Wind and the tunnel tone |
+| Music | The generated bed, until a track is supplied |
+| Mute | Silences the master and leaves the balance alone, so unmuting gives it back |
+
+The audio sliders are the mixer's real bus levels, not a percentage of some
+hidden tuned value, so what the menu shows is what the mixer gets. That is why
+the defaults are not all 100%: they are the balance the game was tuned at. They
+take effect while the slider is still moving, which is the only way to set a
+level by ear.
+
 | Controls | |
 | --- | --- |
 | Deadzone | Stick movement to ignore. Raise it if the car steers on its own |

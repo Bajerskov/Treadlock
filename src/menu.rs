@@ -19,6 +19,7 @@ pub enum Screen {
     /// Reached by pressing play: how this particular race is set up.
     Race,
     Video,
+    Audio,
     Controls,
 }
 
@@ -91,6 +92,7 @@ impl Menu {
                     },
                 },
                 Row { label: "VIDEO", value: None, hint: "DISPLAY AND DETAIL" },
+                Row { label: "AUDIO", value: None, hint: "VOLUME FOR EACH PART OF THE MIX" },
                 Row { label: "CONTROLS", value: None, hint: "GAMEPAD FEEL AND BINDINGS" },
                 Row { label: "QUIT", value: None, hint: "CLOSE THE GAME" },
             ],
@@ -155,6 +157,39 @@ impl Menu {
                 },
                 Row { label: "BACK", value: None, hint: "" },
             ],
+            Screen::Audio => vec![
+                Row {
+                    label: "MASTER",
+                    value: Some(percent(s.audio.master)),
+                    hint: "EVERYTHING AT ONCE",
+                },
+                Row {
+                    label: "ENGINES",
+                    value: Some(percent(s.audio.engine)),
+                    hint: "YOUR CAR AND EVERY CAR AROUND YOU",
+                },
+                Row {
+                    label: "EFFECTS",
+                    value: Some(percent(s.audio.effects)),
+                    hint: "TYRES   IMPACTS   WEAPONS   PICKUPS",
+                },
+                Row {
+                    label: "AMBIENCE",
+                    value: Some(percent(s.audio.ambient)),
+                    hint: "WIND AND THE TUNNEL TONE",
+                },
+                Row {
+                    label: "MUSIC",
+                    value: Some(percent(s.audio.music)),
+                    hint: "GENERATED UNTIL A TRACK IS SUPPLIED",
+                },
+                Row {
+                    label: "MUTE",
+                    value: flag(s.audio.muted),
+                    hint: "SILENCE WITHOUT LOSING THE BALANCE",
+                },
+                Row { label: "BACK", value: None, hint: "" },
+            ],
             Screen::Controls => vec![
                 Row {
                     label: "DEADZONE",
@@ -202,16 +237,25 @@ impl Menu {
         }
     }
 
+    /// Dispatch is by label rather than by row number on purpose. Adding one
+    /// entry to a screen shifts every index below it, and a match on indices
+    /// would then quietly point at the wrong setting - adding AUDIO to the
+    /// main screen would have made QUIT out of it.
+    fn selected(&self) -> &'static str {
+        self.rows().get(self.cursor).map(|r| r.label).unwrap_or("")
+    }
+
     fn adjust(&mut self, delta: i32) -> Outcome {
         let step = delta as f32;
         let mut outcome = Outcome::None;
+        let label = self.selected();
         let s = &mut self.settings;
-        match (self.screen, self.cursor) {
-            (Screen::Race, 0) => {
+        match label {
+            "OPPONENTS" => {
                 let next = s.race.opponents as i32 + delta;
                 s.race.opponents = next.clamp(0, MAX_OPPONENTS as i32) as usize;
             }
-            (Screen::Race, 1) => {
+            "DIFFICULTY" => {
                 let index = Difficulty::ALL
                     .iter()
                     .position(|d| *d == s.race.difficulty)
@@ -219,29 +263,35 @@ impl Menu {
                 let next = (index + delta).clamp(0, Difficulty::ALL.len() as i32 - 1);
                 s.race.difficulty = Difficulty::ALL[next as usize];
             }
-            (Screen::Race, 2) => s.race.weapons = !s.race.weapons,
-            (Screen::Race, 3) => {
+            "WEAPONS" => s.race.weapons = !s.race.weapons,
+            "TRACK" => {
                 // Seed 0 means "a fresh track each time", and is the floor
                 // rather than something you can go below into nonsense.
                 s.race.seed = (s.race.seed as i64 + delta as i64).max(0) as u64;
             }
-            (Screen::Video, 0) => {
+            "FULLSCREEN" => {
                 s.video.fullscreen = !s.video.fullscreen;
                 outcome = Outcome::VideoChanged;
             }
-            (Screen::Video, 1) => {
+            "VSYNC" => {
                 s.video.vsync = !s.video.vsync;
                 outcome = Outcome::VideoChanged;
             }
-            (Screen::Video, 2) => s.video.fov += step * 5.0,
-            (Screen::Video, 3) => s.video.particles += step * 0.1,
-            (Screen::Video, 4) => s.video.skid_marks = !s.video.skid_marks,
-            (Screen::Video, 5) => s.video.scenery = !s.video.scenery,
-            (Screen::Controls, 0) => s.pad.deadzone += step * 0.02,
-            (Screen::Controls, 1) => s.pad.steer_sensitivity += step * 0.05,
-            (Screen::Controls, 2) => s.pad.steer_curve += step * 0.1,
-            (Screen::Controls, 3) => s.pad.invert_steer = !s.pad.invert_steer,
-            (Screen::Controls, 4) => s.pad.rumble = !s.pad.rumble,
+            "FIELD OF VIEW" => s.video.fov += step * 5.0,
+            "PARTICLES" => s.video.particles += step * 0.1,
+            "SKID MARKS" => s.video.skid_marks = !s.video.skid_marks,
+            "SCENERY" => s.video.scenery = !s.video.scenery,
+            "MASTER" => s.audio.master += step * 0.05,
+            "ENGINES" => s.audio.engine += step * 0.05,
+            "EFFECTS" => s.audio.effects += step * 0.05,
+            "AMBIENCE" => s.audio.ambient += step * 0.05,
+            "MUSIC" => s.audio.music += step * 0.05,
+            "MUTE" => s.audio.muted = !s.audio.muted,
+            "DEADZONE" => s.pad.deadzone += step * 0.02,
+            "STEERING" => s.pad.steer_sensitivity += step * 0.05,
+            "STEER CURVE" => s.pad.steer_curve += step * 0.1,
+            "INVERT STEER" => s.pad.invert_steer = !s.pad.invert_steer,
+            "RUMBLE" => s.pad.rumble = !s.pad.rumble,
             // Plain actions have nothing to adjust.
             _ => return Outcome::None,
         }
@@ -253,17 +303,18 @@ impl Menu {
     }
 
     fn activate(&mut self) -> Outcome {
-        match (self.screen, self.cursor) {
-            (Screen::Main, 0) if self.racing => Outcome::Resume,
-            (Screen::Main, 0) => self.go(Screen::Race),
-            (Screen::Main, 1) => self.go(Screen::Video),
-            (Screen::Main, 2) => self.go(Screen::Controls),
-            (Screen::Main, 3) => Outcome::Quit,
-            (Screen::Race, 4) => {
+        match self.selected() {
+            "RESUME" => Outcome::Resume,
+            "PLAY" => self.go(Screen::Race),
+            "VIDEO" => self.go(Screen::Video),
+            "AUDIO" => self.go(Screen::Audio),
+            "CONTROLS" => self.go(Screen::Controls),
+            "QUIT" => Outcome::Quit,
+            "START" => {
                 self.save();
                 Outcome::StartRace
             }
-            (Screen::Race, 5) | (Screen::Video, 6) | (Screen::Controls, 5) => self.back(),
+            "BACK" => self.back(),
             // Everything else on a settings row is a value, and Accept nudges
             // it the same way Right does rather than doing nothing.
             _ => self.adjust(1),
@@ -329,6 +380,7 @@ pub fn build(ui: &mut Ui, menu: &Menu, width: f32, height: f32, pads: usize) {
         Screen::Main => "",
         Screen::Race => "RACE SETUP",
         Screen::Video => "VIDEO",
+        Screen::Audio => "AUDIO",
         Screen::Controls => "CONTROLS",
     };
     if !subtitle.is_empty() {
@@ -433,7 +485,7 @@ mod tests {
     fn every_menu_string_is_in_the_font() {
         let mut m = menu();
         // Walk every screen, and every value each adjustable row can take.
-        for screen in [Screen::Main, Screen::Race, Screen::Video, Screen::Controls] {
+        for screen in [Screen::Main, Screen::Race, Screen::Video, Screen::Audio, Screen::Controls] {
             m.screen = screen;
             for racing in [false, true] {
                 m.racing = racing;
@@ -479,7 +531,7 @@ mod tests {
     #[test]
     fn the_cursor_stays_on_the_list() {
         let mut m = menu();
-        for screen in [Screen::Main, Screen::Race, Screen::Video, Screen::Controls] {
+        for screen in [Screen::Main, Screen::Race, Screen::Video, Screen::Audio, Screen::Controls] {
             m.screen = screen;
             m.cursor = 0;
             let count = m.rows().len();
@@ -535,6 +587,124 @@ mod tests {
         assert_eq!(m.settings.race.difficulty, *Difficulty::ALL.last().unwrap());
     }
 
+    /// Volumes move, and never leave the range the mixer expects.
+    #[test]
+    fn volumes_move_and_stay_in_range() {
+        let mut m = menu();
+        m.screen = Screen::Audio;
+        for row in 0..m.rows().len() {
+            m.cursor = row;
+            for _ in 0..80 {
+                m.input(Action::Right);
+            }
+            for _ in 0..160 {
+                m.input(Action::Left);
+            }
+            for _ in 0..80 {
+                m.input(Action::Right);
+            }
+        }
+        let a = m.settings.audio;
+        for (name, level) in [
+            ("master", a.master),
+            ("engine", a.engine),
+            ("effects", a.effects),
+            ("ambient", a.ambient),
+            ("music", a.music),
+        ] {
+            assert!((0.0..=1.0).contains(&level), "{name} escaped its range at {level}");
+        }
+
+        // And the sliders actually reach both ends.
+        m.cursor = 0;
+        for _ in 0..80 {
+            m.input(Action::Left);
+        }
+        assert_eq!(m.settings.audio.master, 0.0, "master would not go to silence");
+        for _ in 0..80 {
+            m.input(Action::Right);
+        }
+        assert_eq!(m.settings.audio.master, 1.0, "master would not go to full");
+    }
+
+    /// Mute silences the output and gives the balance back untouched. A mute
+    /// that reset the mix would cost the player their settings every time they
+    /// answered the door.
+    #[test]
+    fn mute_silences_without_losing_the_balance() {
+        let mut m = menu();
+        m.settings.audio.engine = 0.9;
+        m.settings.audio.music = 0.1;
+        m.screen = Screen::Audio;
+        while m.selected() != "MUTE" {
+            m.input(Action::Down);
+        }
+
+        m.input(Action::Accept);
+        assert!(m.settings.audio.muted);
+        let muted: crate::audio::Levels = m.settings.audio.into();
+        assert_eq!(muted.master, 0.0, "mute did not silence the master");
+        assert_eq!(muted.engine, 0.9, "mute disturbed the engine level");
+        assert_eq!(muted.music, 0.1, "mute disturbed the music level");
+
+        m.input(Action::Accept);
+        assert!(!m.settings.audio.muted);
+        let live: crate::audio::Levels = m.settings.audio.into();
+        assert!(live.master > 0.0, "unmuting did not restore the master");
+        assert_eq!(live.engine, 0.9);
+        assert_eq!(live.music, 0.1);
+    }
+
+    /// What the menu shows has to be what the mixer is given. A settings screen
+    /// that quietly rescales is a settings screen nobody can reason about.
+    #[test]
+    fn the_levels_the_menu_shows_are_the_levels_the_mixer_gets() {
+        let mut m = menu();
+        m.settings.audio = crate::settings::Audio {
+            master: 0.6,
+            engine: 0.4,
+            effects: 0.8,
+            ambient: 0.2,
+            music: 1.0,
+            muted: false,
+        };
+        let levels: crate::audio::Levels = m.settings.audio.into();
+        assert_eq!(levels.master, 0.6);
+        assert_eq!(levels.engine, 0.4);
+        assert_eq!(levels.effects, 0.8);
+        assert_eq!(levels.ambient, 0.2);
+        assert_eq!(levels.music, 1.0);
+    }
+
+    /// Turning a bus down has to make that bus quieter in the actual output,
+    /// not merely store a smaller number.
+    #[test]
+    fn turning_the_engine_down_makes_the_engine_quieter() {
+        let render = |audio: crate::settings::Audio| {
+            let mut mixer = crate::audio::Mixer::new(48_000.0, 7);
+            mixer.levels = audio.into();
+            mixer.set_scene(crate::audio::Scene {
+                rpm: 0.8,
+                throttle: 1.0,
+                speed: 0.0,
+                enclosure: 0.0,
+                music: 0.0,
+                ..Default::default()
+            });
+            let mut out = vec![0.0f32; 24_000 * 2];
+            mixer.render(&mut out, 2);
+            // Skip the settling glides.
+            out[24_000..].iter().map(|s| s * s).sum::<f32>()
+        };
+
+        let quiet = crate::settings::Audio { music: 0.0, engine: 0.1, ..Default::default() };
+        let loud = crate::settings::Audio { music: 0.0, engine: 1.0, ..Default::default() };
+        let muted = crate::settings::Audio { muted: true, ..loud };
+
+        assert!(render(loud) > render(quiet) * 4.0, "the engine level barely changed the mix");
+        assert!(render(muted) < 1e-9, "mute left sound coming out");
+    }
+
     /// Play leads to the race setup, and start from there starts a race. This
     /// is the one path through the front end that everybody takes.
     #[test]
@@ -549,6 +719,39 @@ mod tests {
             m.input(Action::Down);
         }
         assert_eq!(m.input(Action::Accept), Outcome::StartRace);
+    }
+
+    /// No entry may be dead.
+    ///
+    /// Dispatch is by label, so a typo in one would fall through to the
+    /// value-adjusting arm and do nothing at all - a menu entry that looks
+    /// fine and simply never responds. Every plain action is pressed here and
+    /// has to do something.
+    #[test]
+    fn every_plain_entry_does_something_when_pressed() {
+        for screen in [Screen::Main, Screen::Race, Screen::Video, Screen::Audio, Screen::Controls] {
+            for racing in [false, true] {
+                let mut m = menu();
+                m.screen = screen;
+                m.racing = racing;
+                for row in 0..m.rows().len() {
+                    // A row with no value is an action rather than a setting.
+                    if m.rows()[row].value.is_some() {
+                        continue;
+                    }
+                    let mut m = menu();
+                    m.screen = screen;
+                    m.racing = racing;
+                    m.cursor = row;
+                    let label = m.selected();
+                    let outcome = m.input(Action::Accept);
+                    assert!(
+                        outcome != Outcome::None || m.screen != screen,
+                        "{label:?} on {screen:?} did nothing when pressed"
+                    );
+                }
+            }
+        }
     }
 
     /// Escape backs out of a sub-screen rather than quitting, and quits only

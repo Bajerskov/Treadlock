@@ -76,6 +76,20 @@ impl Default for Levels {
     }
 }
 
+impl From<crate::settings::Audio> for Levels {
+    fn from(a: crate::settings::Audio) -> Levels {
+        Levels {
+            // Mute zeroes the master and leaves every other level alone, so
+            // unmuting restores the balance rather than a default.
+            master: if a.muted { 0.0 } else { a.master },
+            engine: a.engine,
+            effects: a.effects,
+            ambient: a.ambient,
+            music: a.music,
+        }
+    }
+}
+
 pub struct Mixer {
     rate: f32,
     scene: Scene,
@@ -430,6 +444,12 @@ impl Audio {
     pub fn update(&self, scene: Scene) {
         if let Ok(mut mixer) = self.mixer.lock() {
             mixer.set_scene(scene);
+        }
+    }
+
+    pub fn set_levels(&self, levels: Levels) {
+        if let Ok(mut mixer) = self.mixer.lock() {
+            mixer.levels = levels;
         }
     }
 
