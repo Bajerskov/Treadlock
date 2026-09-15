@@ -17,6 +17,10 @@ gltf = { version = "1.4", default-features = false, features = ["import", "utils
 # Already in the tree through gltf; named here so background plates can be
 # supplied as PNGs rather than only generated.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Author-time only, for the Meshy model generator. Off by default: the game
+# itself never talks to a paid service at runtime.
+ureq = { version = "3", features = ["json"], optional = true }
+serde_json = { version = "1", optional = true }
 # Optional so the game builds on a machine with no audio development headers,
 # which is also how the mixer stays testable without a sound card.
 cpal = { version = "0.18", optional = true }
@@ -24,6 +28,7 @@ cpal = { version = "0.18", optional = true }
 [features]
 default = ["audio"]
 audio = ["dep:cpal"]
+meshy = ["dep:ureq", "dep:serde_json"]
 
 [profile.release]
 opt-level = 3

@@ -6,6 +6,8 @@ mod gfx;
 mod input;
 mod marks;
 mod mesh;
+#[cfg(feature = "meshy")]
+mod meshy;
 mod model;
 mod particles;
 mod plates;
@@ -114,6 +116,32 @@ fn main() {
     if std::env::args().any(|a| a == "--assets") {
         assets::Library::load("assets").report(true);
         return;
+    }
+    // Model generation is an author-time step, not something the game does.
+    #[cfg(feature = "meshy")]
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        let flag = |name: &str| argv.iter().any(|a| a == name);
+        if flag("--meshy-balance") || flag("--meshy-cars") {
+            let result = if flag("--meshy-balance") {
+                meshy::balance()
+            } else {
+                meshy::generate_cars(
+                    &assets::Library::load("assets"),
+                    flag("--refine"),
+                    flag("--dry-run"),
+                )
+            };
+            if let Err(e) = result {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+    }
+    if std::env::args().any(|a| a.starts_with("--meshy")) && cfg!(not(feature = "meshy")) {
+        eprintln!("--meshy needs the feature: cargo run --features meshy -- --meshy-cars");
+        std::process::exit(2);
     }
     // Loading and refitting a model needs no GPU either, so a file can be
     // checked before committing to a run.

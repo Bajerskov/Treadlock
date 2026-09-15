@@ -1,8 +1,4 @@
-
-| `src/assets.rs` | The manifest: what the game loads and what it does without |
-| `src/audio/` | Synthesis, mixing, WAV loading, cpal device |
-| `src/scenery.rs` | Background props and the sky dome |
-| `src/plates.rs` | Generated and loaded background layers |# Treadlock
+# Treadlock
 
 A fast arcade racer on procedurally generated tube tracks, where cars drive on
 the walls and the ceiling. Built in Rust on a custom Vulkan renderer, targeting
@@ -117,6 +113,42 @@ Note that the car spends time inverted, and the physics treats a flip as
 recoverable rather than fatal. A model with a strongly asymmetric silhouette
 will read oddly during those moments; symmetric, big-wheeled designs suit the
 game better.
+
+### Generating cars with Meshy
+
+Car bodies can be generated rather than modelled, through the Meshy API. This
+is an author-time step behind an optional feature: the game binary carries no
+HTTP client and never talks to a paid service while racing. Generate once,
+commit the `.glb` files, and the manifest picks them up.
+
+```sh
+export MESHY_API_KEY=...                                    # never written to disk
+cargo run --features meshy -- --meshy-cars --dry-run        # prompts and targets, spends nothing
+cargo run --features meshy -- --meshy-cars                  # generate the missing cars
+cargo run --features meshy -- --meshy-cars --refine         # slower, costlier, textured
+cargo run --features meshy -- --meshy-balance               # credits remaining
+```
+
+Slots that already have a file are skipped, so an interrupted run resumes
+instead of paying twice, and one car failing does not discard the ones that
+worked.
+
+The prompts ask for symmetric, big-wheeled bodies on purpose: the game spends
+real time upside down, and a car with a strongly asymmetric silhouette reads as
+broken during those moments rather than as inverted.
+
+Generated models arrive at arbitrary scale and facing, which the loader already
+corrects. Check one before racing it:
+
+```sh
+cargo run --release -- --check-model --car assets/models/cars/player.glb
+```
+
+**A caveat worth knowing.** Both `docs.meshy.ai` and `api.meshy.ai` were
+unreachable from the machine this was written on, so the endpoint paths and
+JSON field names are unverified against the live service. They are all in one
+block at the top of `src/meshy.rs` for that reason. If a call returns 404 or
+complains about a missing field, that block is the only place to look.
 
 ## Assets
 
@@ -234,5 +266,7 @@ they mean for this engine.
 | `src/audio/` | Synthesis, mixing, WAV loading, cpal device |
 | `src/scenery.rs` | Background props and the sky dome |
 | `src/plates.rs` | Generated and loaded background layers |
+| `src/marks.rs` | Skid marks |
+| `src/meshy.rs` | Author-time model generation (optional feature) |
 | `src/gfx/` | Vulkan context, swapchain, buffers, renderer |
 | `src/shaders/` | WGSL, translated at pipeline build |
