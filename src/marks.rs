@@ -180,9 +180,20 @@ mod tests {
     use crate::vehicle::{autopilot, Controls};
 
     /// Drive a race and return the marks laid during it.
+    ///
+    /// Driven alone, weapons off, with the first seconds thrown away. All
+    /// three are noise here: a car that has been shot slides because it was
+    /// shot, a start-line scramble slides because six cars want the same
+    /// corner, and traffic slides you all race long. None of that says
+    /// anything about whether a sliding tyre leaves rubber.
     fn race(seed: u64, seconds: f32, mut drive: impl FnMut(&Sim) -> Controls) -> (Sim, Marks) {
-        let mut sim = Sim::new(seed);
+        let setup = crate::settings::Race { opponents: 0, weapons: false, ..Default::default() };
+        let mut sim = Sim::with_setup(seed, setup);
         let mut marks = Marks::new();
+        for _ in 0..(8.0 / TICK_DT) as usize {
+            let controls = autopilot(&sim.track, &sim.player, 26.0);
+            sim.tick(&controls, TICK_DT);
+        }
         for _ in 0..(seconds / TICK_DT) as usize {
             let controls = drive(&sim);
             sim.tick(&controls, TICK_DT);

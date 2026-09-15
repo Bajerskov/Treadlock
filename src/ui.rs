@@ -48,7 +48,7 @@ pub struct UiVertex {
 }
 
 /// Each byte is one row, low five bits, most significant bit leftmost.
-const FONT: [(char, [u8; 7]); 44] = [
+const FONT: [(char, [u8; 7]); 45] = [
     (' ', [0, 0, 0, 0, 0, 0, 0]),
     ('0', [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110]),
     ('1', [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]),
@@ -93,6 +93,7 @@ const FONT: [(char, [u8; 7]); 44] = [
     ('+', [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000]),
     ('%', [0b11001, 0b11010, 0b00010, 0b00100, 0b01000, 0b01011, 0b10011]),
     ('?', [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100]),
+    ('>', [0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000]),
 ];
 
 /// Rasterise the font into RGBA8. White glyphs on transparent black, so colour
@@ -125,6 +126,15 @@ pub fn build_atlas() -> Vec<u8> {
         }
     }
     pixels
+}
+
+// Used by the menu and HUD tests, which is where a font gap is caught.
+#[allow(dead_code)]
+/// The first character of `text` the font cannot draw, if any. The menus and
+/// the HUD are both checked against this, because a missing glyph shows up as
+/// a silent hole in a word rather than as an error.
+pub fn missing_glyph(text: &str) -> Option<char> {
+    text.chars().find(|c| glyph_slot(*c).is_none())
 }
 
 fn glyph_slot(c: char) -> Option<u32> {

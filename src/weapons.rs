@@ -126,6 +126,10 @@ pub struct Arsenal {
     ai_delay: Vec<f32>,
     rng: u64,
     pub events: Vec<Event>,
+    /// Weapons off makes this a pure racing game, crates and all.
+    pub enabled: bool,
+    /// How readily the AI shoots, from the difficulty. 1 is the baseline.
+    pub aggression: f32,
 }
 
 impl Arsenal {
@@ -139,6 +143,8 @@ impl Arsenal {
             ai_delay: vec![0.0; drivers],
             rng: seed | 1,
             events: Vec::new(),
+            enabled: true,
+            aggression: 1.0,
         }
     }
 
@@ -191,6 +197,9 @@ impl Arsenal {
         dt: f32,
     ) {
         self.events.clear();
+        if !self.enabled {
+            return;
+        }
         let drivers = cars.len();
         // Rank 0 is the leader.
         let mut order: Vec<usize> = (0..drivers).collect();
@@ -324,7 +333,9 @@ impl Arsenal {
         }
         // Re-check a few times a second rather than every tick, and stagger the
         // field so they do not all decide together.
-        self.ai_delay[driver] = 0.25 + self.next() * 0.35;
+        // Harder settings decide faster and so shoot sooner.
+        let patience = (0.25 + self.next() * 0.35) / self.aggression.max(0.05);
+        self.ai_delay[driver] = patience;
 
         let me = &cars[driver];
         match weapon {

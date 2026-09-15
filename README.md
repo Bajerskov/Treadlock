@@ -23,6 +23,7 @@ Playable vertical slice in progress.
 - [x] Background scenery and a seeded sky
 - [ ] Ray-traced reflections
 - [x] Weapons, traps and shields
+- [x] Front end: race setup, video and controller settings
 
 ## Building and running
 
@@ -51,7 +52,7 @@ cargo run --release -- --car car.glb   # use your own car model
 | Hand the car to the AI | P | - |
 | Orbit camera on/off | C | - |
 | Orbit / zoom, while orbiting | Drag / wheel | - |
-| Quit | Esc | - |
+| Menu, and pause mid-race | Esc | B |
 
 `P` gives the player car to the same driver the opponents use, so what you are
 watching is the real racing line rather than a separate demo mode. Together
@@ -73,6 +74,63 @@ cargo run --release -- --check-shaders        # translate WGSL, no GPU needed
 Headless mode reports average and top speed, wheel contact percentage, lap
 times, and whether the car ever escaped the tube. A diverging or escaping run
 exits non-zero.
+
+## The front end
+
+The game starts on a menu, over a live race: the field is already going round
+behind it, which is both the attract mode and what the video settings are
+previewed against. **Escape** during a race reopens it as a pause screen.
+
+Arrows or the left stick move, left and right change a value, Enter or A
+selects, Escape or B goes back. The footer says whether a gamepad was found,
+which is the fastest answer to "why is my controller not working".
+
+**Play** opens the race setup: how many opponents (0 to 9, so a solo hot lap is
+reachable), the difficulty, whether weapons are on, and the track. A track of
+`RANDOM` generates a fresh one each race; any number races the same track every
+time, which is how you compare a lap against yourself.
+
+| Difficulty | Field | Weapons |
+| --- | --- | --- |
+| **CRUISE** | Slower | They rarely shoot |
+| **RACER** | Even | Normal |
+| **VETERAN** | Fast | They shoot often |
+| **ROLLCAGE** | Flat out | They shoot on sight |
+
+Difficulty sets the skill range the field is spread across - skill scales
+throttle, how far ahead a driver reads the track, and whether they use boost -
+and how readily the AI pulls the trigger.
+
+Nothing in the menus is decoration. Every setting listed changes something:
+
+| Video | |
+| --- | --- |
+| Fullscreen, vsync | Rebuild the swapchain |
+| Field of view | The camera's lens at a standstill; speed still widens it |
+| Particles | Scales every emitter. The cheapest thing to turn down |
+| Skid marks | The decal pass |
+| Scenery | The skyline and sky, and their two draws |
+
+| Controls | |
+| --- | --- |
+| Deadzone | Stick movement to ignore. Raise it if the car steers on its own |
+| Steering | How far the stick turns the wheels |
+| Steer curve | Above 1 is gentler near the centre and unchanged at the stops |
+| Invert steer, rumble | |
+
+Settings are written to `treadlock.cfg` next to the executable, as plain
+`key value` lines, when you leave a menu screen rather than on every keypress.
+The file is safe to edit by hand: an unknown key is skipped, a malformed value
+keeps its default, and anything out of range is brought back into it, so a
+damaged file can never stop the game starting.
+
+The command line still wins where it was given. `--seed` and `--no-vsync`
+override the saved settings rather than the other way round, so every existing
+invocation keeps working.
+
+One thing the deadzone taught: subtracting it without rescaling what is left
+quietly costs the player the last of their steering lock, which feels like a
+broken controller rather than a setting. There is a test for it.
 
 ## Car models
 
@@ -309,6 +367,8 @@ they mean for this engine.
 | `src/plates.rs` | Generated and loaded background layers |
 | `src/marks.rs` | Skid marks |
 | `src/weapons.rs` | Pickups, rockets, mines, shields and shocks |
+| `src/menu.rs` | The front end and its screens |
+| `src/settings.rs` | Saved settings, and what each one changes |
 | `src/meshy.rs` | Author-time model generation (optional feature) |
 | `src/gfx/` | Vulkan context, swapchain, buffers, renderer |
 | `src/shaders/` | WGSL, translated at pipeline build |

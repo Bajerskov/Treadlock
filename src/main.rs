@@ -5,6 +5,7 @@ mod effects;
 mod gfx;
 mod input;
 mod marks;
+mod menu;
 mod mesh;
 #[cfg(feature = "meshy")]
 mod meshy;
@@ -12,6 +13,7 @@ mod model;
 mod particles;
 mod plates;
 mod scenery;
+mod settings;
 mod sim;
 mod track;
 mod ui;
@@ -192,13 +194,18 @@ fn run(args: Args) {
     );
 
     let size = window.inner_size();
-    let mut swapchain = Swapchain::new(&mut ctx, size.width, size.height, args.vsync);
+    let settings = settings::Settings::load();
+    // The command line still wins where it was given, so an explicit flag is
+    // never silently overridden by a saved setting.
+    let mut vsync = args.vsync && settings.video.vsync;
+    let mut swapchain = Swapchain::new(&mut ctx, size.width, size.height, vsync);
     let mut renderer = Renderer::new(&mut ctx, &swapchain);
 
-    let mut sim = Sim::new(args.seed);
+    let seed = race_seed(&settings, args.seed);
+    let mut sim = Sim::with_setup(seed, settings.race);
     println!(
         "track: seed {} | {:.0} m | {} frames",
-        args.seed,
+        seed,
         sim.track.length,
         sim.track.frames.len()
     );
@@ -209,6 +216,14 @@ fn run(args: Args) {
         &sim.track.vertices,
         &sim.track.indices,
     );
+    // The front end starts up over a live race, which is both the attract mode
+    // and the thing the video settings are previewed against.
+    let mut menu = menu::Menu::new(settings);
+    let mut in_menu = true;
+    // Work the menu asked for that has to happen between frames rather than
+    // inside an event handler, where the swapchain is not reachable.
+    let mut pending: Option<Pending> = None;
+
     let library = assets::Library::load("assets");
     let missing = library.missing().len();
     if missing > 0 {
@@ -300,16 +315,58 @@ fn run(args: Args) {
                 WindowEvent::CloseRequested => target.exit(),
                 WindowEvent::Resized(size) => {
                     if size.width > 0 && size.height > 0 {
-                        swapchain.recreate(&mut ctx, size.width, size.height, args.vsync);
+                        swapchain.recreate(&mut ctx, size.width, size.height, vsync);
                         renderer.rebuild_pipeline(&mut ctx, &swapchain);
                         renderer.needs_resize = false;
                     }
                 }
                 WindowEvent::KeyboardInput { event, .. } => {
                     let pressed = event.state == ElementState::Pressed;
+                    // While the menu is up it takes the keyboard. Driving keys
+                    // are not fed through, or the car would be steered from
+                    // behind the front end.
+                    if in_menu {
+                        if !pressed {
+                            return;
+                        }
+                        let PhysicalKey::Code(code) = event.physical_key else {
+                            return;
+                        };
+                        let action = match code {
+                            KeyCode::ArrowUp | KeyCode::KeyW => Some(menu::Action::Up),
+                            KeyCode::ArrowDown | KeyCode::KeyS => Some(menu::Action::Down),
+                            KeyCode::ArrowLeft | KeyCode::KeyA => Some(menu::Action::Left),
+                            KeyCode::ArrowRight | KeyCode::KeyD => Some(menu::Action::Right),
+                            KeyCode::Enter | KeyCode::Space => Some(menu::Action::Accept),
+                            KeyCode::Escape => Some(menu::Action::Back),
+                            _ => None,
+                        };
+                        let Some(action) = action else { return };
+                        match menu.input(action) {
+                            menu::Outcome::Quit => target.exit(),
+                            menu::Outcome::StartRace => {
+                                pending = Some(Pending::Race);
+                                in_menu = false;
+                            }
+                            menu::Outcome::Resume => in_menu = false,
+                            menu::Outcome::VideoChanged => pending = Some(Pending::Video),
+                            menu::Outcome::None => {}
+                        }
+                        return;
+                    }
                     if let PhysicalKey::Code(code) = event.physical_key {
                         match code {
-                            KeyCode::Escape => target.exit(),
+                            // Escape opens the menu rather than quitting: the
+                            // race is still running behind it and quitting is a
+                            // choice made on purpose, from the menu.
+                            KeyCode::Escape if pressed => {
+                                in_menu = true;
+                                menu.racing = true;
+                                menu.screen = menu::Screen::Main;
+                                // Let go of everything, or a key held when the
+                                // menu opened stays held when it closes.
+                                input.keys = input::Keys::default();
+                            }
                             KeyCode::KeyW | KeyCode::ArrowUp => input.keys.up = pressed,
                             KeyCode::KeyS | KeyCode::ArrowDown => input.keys.down = pressed,
                             KeyCode::KeyA | KeyCode::ArrowLeft => input.keys.left = pressed,
@@ -349,6 +406,77 @@ fn run(args: Args) {
                     last = now;
 
                     input.poll();
+
+                    // The pad drives the menu too, polled here rather than
+                    // handled as an event because evdev is read per frame. A
+                    // console has to be usable without reaching for a keyboard.
+                    if in_menu {
+                        if let Some(action) = input.take_menu_action() {
+                            match menu.input(action) {
+                                menu::Outcome::Quit => target.exit(),
+                                menu::Outcome::StartRace => {
+                                    pending = Some(Pending::Race);
+                                    in_menu = false;
+                                }
+                                menu::Outcome::Resume => in_menu = false,
+                                menu::Outcome::VideoChanged => pending = Some(Pending::Video),
+                                menu::Outcome::None => {}
+                            }
+                        }
+                    }
+
+                    // Act on what the menu asked for, here rather than in the
+                    // key handler, where the swapchain is out of reach.
+                    match pending.take() {
+                        Some(Pending::Race) => {
+                            let seed = race_seed(&menu.settings, args.seed);
+                            sim = Sim::with_setup(seed, menu.settings.race);
+                            println!(
+                                "race: seed {seed} | {} opponents | {} | weapons {}",
+                                menu.settings.race.opponents,
+                                menu.settings.race.difficulty.name(),
+                                if menu.settings.race.weapons { "on" } else { "off" }
+                            );
+                            // The track changed, so everything baked from it has
+                            // to be rebuilt before it is drawn again.
+                            unsafe { ctx.device.device_wait_idle().ok() };
+                            track_mesh.destroy(&mut ctx);
+                            pad_mesh.destroy(&mut ctx);
+                            prop_mesh.destroy(&mut ctx);
+                            track_mesh = GpuMesh::upload(
+                                &mut ctx,
+                                "track",
+                                &sim.track.vertices,
+                                &sim.track.indices,
+                            );
+                            let (pv, pi) = sim.track.boost_pad_mesh();
+                            pad_mesh = GpuMesh::upload(&mut ctx, "boost pads", &pv, &pi);
+                            let scenery = scenery::generate(&sim.track, seed, &library);
+                            prop_mesh = GpuMesh::from_mesh(&mut ctx, "scenery", &scenery.props);
+
+                            particles = particles::Particles::new();
+                            skid = marks::Marks::new();
+                            cues = audio::Cues::new();
+                            ai_driving = false;
+                            camera.snap(&sim.player, &sim.track);
+                        }
+                        Some(Pending::Video) => {
+                            window.set_fullscreen(if menu.settings.video.fullscreen {
+                                Some(winit::window::Fullscreen::Borderless(None))
+                            } else {
+                                None
+                            });
+                            vsync = args.vsync && menu.settings.video.vsync;
+                            let size = window.inner_size();
+                            if size.width > 0 && size.height > 0 {
+                                swapchain.recreate(&mut ctx, size.width, size.height, vsync);
+                                renderer.rebuild_pipeline(&mut ctx, &swapchain);
+                                renderer.needs_resize = false;
+                            }
+                        }
+                        None => {}
+                    }
+
                     if input.take_respawn() {
                         sim.player.respawn(&sim.track);
                         camera.snap(&sim.player, &sim.track);
@@ -356,41 +484,54 @@ fn run(args: Args) {
                     }
                     // Under AI the player car takes the same driver the
                     // opponents use, so what you are watching is the real
-                    // racing line rather than a separate demo mode.
-                    let controls = if ai_driving {
+                    // racing line rather than a separate demo mode. Behind the
+                    // menu that is also the attract mode: the field races on
+                    // while the player reads the front end.
+                    let controls = if ai_driving || in_menu {
                         let lookahead = 26.0 + sim.player.speed() * 0.12;
                         vehicle::autopilot_lane(&sim.track, &sim.player, lookahead, 0.0)
                     } else {
-                        input.controls()
+                        input.controls(&menu.settings.pad)
                     };
                     sim.update(&controls, dt);
                     camera.update(&sim.player, &sim.track, dt);
+                    camera.base_fov = menu.settings.video.fov.to_radians();
                     cues.poll(&sim, &audio, dt);
                     audio.update(audio::observe(&sim, &camera, controls.throttle));
 
                     if renderer.needs_resize {
                         let size = window.inner_size();
                         if size.width > 0 && size.height > 0 {
-                            swapchain.recreate(&mut ctx, size.width, size.height, args.vsync);
+                            swapchain.recreate(&mut ctx, size.width, size.height, vsync);
                             renderer.needs_resize = false;
                         }
                     }
 
                     let aspect =
                         swapchain.extent.width as f32 / swapchain.extent.height.max(1) as f32;
-                    let controls = input.controls();
+                    // The effects read the same controls the car did, not a
+                    // fresh poll: under the AI or behind the menu those are the
+                    // autopilot's, and a second poll would show an idle
+                    // keyboard and stop the exhaust.
+                    let video = menu.settings.video;
                     effects::update(
                         &mut particles,
                         &sim,
-                        dt,
+                        dt * video.particles,
                         controls.throttle,
                         controls.brake,
                         controls.boost,
                     );
-                    skid.update(&sim, dt);
+                    if video.skid_marks {
+                        skid.update(&sim, dt);
+                    }
                     let (right, up) = camera.basis();
                     let particle_vertices = particles.build_vertices(right, up).to_vec();
-                    let mark_vertices = skid.build_vertices().to_vec();
+                    let mark_vertices = if video.skid_marks {
+                        skid.build_vertices().to_vec()
+                    } else {
+                        Vec::new()
+                    };
 
                     let world = World {
                         track: &track_mesh,
@@ -405,22 +546,35 @@ fn run(args: Args) {
                         &garage,
                         &props,
                         camera.pos,
+                        video.scenery,
                     );
                     let (screen_w, screen_h) =
                         (swapchain.extent.width as f32, swapchain.extent.height as f32);
-                    ui::build_hud(&mut hud, &sim, screen_w, screen_h);
-                    if sim.wrong_way() {
-                        ui::build_wrong_way(&mut hud, screen_w, screen_h, sim.time);
-                    }
-                    ui::build_mode_banner(
-                        &mut hud,
-                        screen_w,
-                        screen_h,
-                        ai_driving,
-                        camera.mode == camera::Mode::Orbit,
-                    );
-                    if args.debug_hud {
-                        ui::build_orientation_markers(&mut hud, screen_w, screen_h);
+                    if in_menu {
+                        // The menu replaces the HUD rather than sitting over
+                        // it: two sets of numbers at once is unreadable.
+                        menu::build(
+                            &mut hud,
+                            &menu,
+                            screen_w,
+                            screen_h,
+                            input.gamepad_count(),
+                        );
+                    } else {
+                        ui::build_hud(&mut hud, &sim, screen_w, screen_h);
+                        if sim.wrong_way() {
+                            ui::build_wrong_way(&mut hud, screen_w, screen_h, sim.time);
+                        }
+                        ui::build_mode_banner(
+                            &mut hud,
+                            screen_w,
+                            screen_h,
+                            ai_driving,
+                            camera.mode == camera::Mode::Orbit,
+                        );
+                        if args.debug_hud {
+                            ui::build_orientation_markers(&mut hud, screen_w, screen_h);
+                        }
                     }
 
                     renderer.draw(
@@ -499,6 +653,34 @@ fn run(args: Args) {
             _ => {}
         })
         .expect("event loop failed");
+}
+
+/// The track to race. A stored seed of zero means a fresh track each time,
+/// which is what "RANDOM" in the menu selects; anything else is reproducible.
+///
+/// `fallback` is what `--seed` asked for, so the flag still decides when it was
+/// given and the menu decides when it was not.
+fn race_seed(settings: &settings::Settings, fallback: u64) -> u64 {
+    if settings.race.seed != 0 {
+        return settings.race.seed;
+    }
+    if fallback != 7 {
+        // Not the default, so it was asked for explicitly.
+        return fallback;
+    }
+    // Something that differs between runs without pulling in a clock crate.
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(fallback)
+        | 1
+}
+
+/// Something the menu asked for that has to be done between frames, where the
+/// window and the swapchain are reachable.
+enum Pending {
+    Race,
+    Video,
 }
 
 /// One body in the field: its meshes and its livery map.
@@ -639,8 +821,11 @@ fn build_draws<'a>(
     garage: &'a Garage,
     props: &'a Props,
     camera_pos: Vec3,
+    scenery: bool,
 ) -> Vec<Draw<'a>> {
-    let mut draws = vec![
+    let mut draws: Vec<Draw> = Vec::new();
+    if scenery {
+        draws.extend([
         // The sky first, and carried on the camera so it can never be reached.
         // Its radius sits inside the far plane; drawn as real geometry rather
         // than as a full-screen pass, because it is cheap either way and this
@@ -663,27 +848,29 @@ fn build_draws<'a>(
             metallic: 0.0,
             texture: None,
         },
-        Draw {
-            mesh: world.track,
-            model: Mat4::IDENTITY,
-            tint: Vec3::new(0.30, 0.33, 0.40),
-            surface: 1.0,
-            emissive: 0.0,
-            metallic: 0.35,
-            texture: None,
-        },
-        // Pads are their own mesh so they can glow without needing a per-vertex
-        // material on the tube. surface = 2 selects the pad shading.
-        Draw {
-            mesh: world.pads,
-            model: Mat4::IDENTITY,
-            tint: Vec3::new(0.10, 0.45, 0.75),
-            surface: 2.0,
-            emissive: 1.0,
-            metallic: 0.5,
-            texture: None,
-        },
-    ];
+        ]);
+    }
+
+    draws.push(Draw {
+        mesh: world.track,
+        model: Mat4::IDENTITY,
+        tint: Vec3::new(0.30, 0.33, 0.40),
+        surface: 1.0,
+        emissive: 0.0,
+        metallic: 0.35,
+        texture: None,
+    });
+    // Pads are their own mesh so they can glow without needing a per-vertex
+    // material on the tube. surface = 2 selects the pad shading.
+    draws.push(Draw {
+        mesh: world.pads,
+        model: Mat4::IDENTITY,
+        tint: Vec3::new(0.10, 0.45, 0.75),
+        surface: 2.0,
+        emissive: 1.0,
+        metallic: 0.5,
+        texture: None,
+    });
 
     // Weapon props. Each is its own draw with a small shared mesh: a crate has
     // to be able to wink out on its own when collected, which a single baked

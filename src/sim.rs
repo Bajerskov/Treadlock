@@ -9,8 +9,6 @@ use crate::vehicle::{self, Controls, Vehicle};
 pub const TICK_RATE: f32 = 120.0;
 pub const TICK_DT: f32 = 1.0 / TICK_RATE;
 
-/// How many AI cars line up alongside the player.
-pub const OPPONENT_COUNT: usize = 5;
 /// Cars closer than this push each other apart.
 const CONTACT_RADIUS: f32 = 3.4;
 
@@ -66,22 +64,37 @@ const WRONG_WAY_SPEED: f32 = 4.0;
 const WRONG_WAY_DELAY: f32 = 0.7;
 
 impl Sim {
+    /// A race with the default setup, which is what the tests and the headless
+    /// check want.
     pub fn new(seed: u64) -> Sim {
+        Sim::with_setup(seed, crate::settings::Race::default())
+    }
+
+    pub fn with_setup(seed: u64, setup: crate::settings::Race) -> Sim {
         let track = Track::generate(seed);
         let player = Vehicle::new(&track, 0);
         let prev_distance = player.distance;
+        let count = setup.opponents.min(crate::settings::MAX_OPPONENTS);
+        let (low, high) = setup.difficulty.skill_range();
 
         // Spread the field across the track and vary how hard each driver
         // pushes, so they do not move as one block.
-        let opponents = (0..OPPONENT_COUNT)
+        let opponents = (0..count)
             .map(|i| {
                 let car = Vehicle::new(&track, i + 1);
-                let spread = (i as f32 / OPPONENT_COUNT.max(1) as f32) * 2.0 - 1.0;
+                let across = if count > 1 {
+                    (i as f32 / (count - 1) as f32) * 2.0 - 1.0
+                } else {
+                    0.0
+                };
                 Opponent {
                     prev_distance: car.distance,
                     car,
-                    lane: spread * 7.0,
-                    skill: 0.82 + 0.16 * (i as f32 / OPPONENT_COUNT.max(1) as f32),
+                    lane: across * 7.0,
+                    // Spread over the difficulty's own range rather than a
+                    // fixed band, so the field stays evenly matched whichever
+                    // setting it is racing at.
+                    skill: low + (high - low) * (i as f32 / count.max(1) as f32),
                     progress: 0.0,
                     lap: 0,
                     tint: opponent_colour(i),
@@ -89,7 +102,9 @@ impl Sim {
             })
             .collect();
 
-        let weapons = crate::weapons::Arsenal::new(&track, seed, OPPONENT_COUNT + 1);
+        let mut weapons = crate::weapons::Arsenal::new(&track, seed, count + 1);
+        weapons.enabled = setup.weapons;
+        weapons.aggression = setup.difficulty.aggression();
 
         Sim {
             track,
@@ -193,7 +208,13 @@ mod tests {
     /// being shoved forward by five others - which measures contact, not
     /// direction.
     fn clear_of_the_grid(seed: u64) -> Sim {
-        let mut sim = Sim::new(seed);
+        // Alone on the track. A car trying to reverse out of a pack is being
+        // shoved forward by five others, and one that has just been shot is
+        // spinning for a reason the warning deliberately stays quiet about.
+        // Neither has anything to do with whether the warning notices a car
+        // going the wrong way.
+        let setup = crate::settings::Race { opponents: 0, weapons: false, ..Default::default() };
+        let mut sim = Sim::with_setup(seed, setup);
         for _ in 0..(6.0 / TICK_DT) as usize {
             let controls = autopilot(&sim.track, &sim.player, 26.0);
             sim.tick(&controls, TICK_DT);
@@ -237,7 +258,8 @@ mod tests {
     #[test]
     fn racing_forwards_barely_ever_warns() {
         for seed in [1u64, 7, 42] {
-            let mut sim = Sim::new(seed);
+            let setup = crate::settings::Race { weapons: false, ..Default::default() };
+            let mut sim = Sim::with_setup(seed, setup);
             let ticks = (120.0 / TICK_DT) as usize;
             let mut warned = 0usize;
 
@@ -309,7 +331,7 @@ mod tests {
     #[test]
     fn opponents_race_without_overlapping() {
         let mut sim = Sim::new(7);
-        assert_eq!(sim.opponents.len(), OPPONENT_COUNT);
+        assert_eq!(sim.opponents.len(), crate::settings::Race::default().opponents);
 
         let mut closest = f32::MAX;
         for _ in 0..(120.0 / TICK_DT) as usize {

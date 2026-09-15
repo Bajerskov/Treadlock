@@ -25,6 +25,9 @@ pub struct Camera {
     pub target: Vec3,
     pub up: Vec3,
     pub fov: f32,
+    /// The player's field of view at a standstill, in radians. Speed widens the
+    /// lens from here; the setting moves where "here" is.
+    pub base_fov: f32,
     pub mode: Mode,
     orbit_yaw: f32,
     orbit_pitch: f32,
@@ -38,6 +41,7 @@ impl Camera {
             target: v.pos,
             up: v.up(),
             fov: 70f32.to_radians(),
+            base_fov: 68f32.to_radians(),
             mode: Mode::Chase,
             // Three-quarter view from behind and slightly above, which shows
             // the most of a car in one look.
@@ -135,7 +139,7 @@ impl Camera {
 
         // Widening the field of view with speed reads as acceleration even when
         // the number on the dial is not visible.
-        let target_fov = (68.0 + 22.0 * speed_factor).to_radians();
+        let target_fov = self.base_fov + 22f32.to_radians() * speed_factor;
         self.fov += (target_fov - self.fov) * (1.0 - (-dt * 5.0).exp());
     }
 
