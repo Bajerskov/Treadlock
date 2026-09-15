@@ -12,13 +12,12 @@
 
 pub mod synth;
 pub mod voices;
-pub mod wav;
+pub mod sound;
 
 use std::sync::{Arc, Mutex};
 
 use glam::Vec3;
 
-use crate::assets::Library;
 use crate::camera::Camera;
 use crate::sim::Sim;
 pub use voices::{Cue, Source};
@@ -90,6 +89,93 @@ impl From<crate::settings::Audio> for Levels {
     }
 }
 
+/// Every track found in the music folder, played in turn.
+///
+/// Scanning a folder rather than naming files in the manifest is deliberate:
+/// adding music should be dropping a file in, not editing a text file as well.
+pub struct Playlist {
+    tracks: Vec<sound::Clip>,
+    current: usize,
+    frame: f64,
+}
+
+impl Playlist {
+    pub fn new() -> Playlist {
+        Playlist { tracks: Vec::new(), current: 0, frame: 0.0 }
+    }
+
+    // Built directly, for the tests. The game scans a folder.
+    #[allow(dead_code)]
+    pub fn from_tracks(tracks: Vec<sound::Clip>) -> Playlist {
+        Playlist { tracks, current: 0, frame: 0.0 }
+    }
+
+    /// Load every audio file in `folder`, sorted by name so the running order
+    /// is the player's to choose by naming them.
+    pub fn load(folder: &std::path::Path) -> Playlist {
+        let mut paths: Vec<std::path::PathBuf> = match std::fs::read_dir(folder) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && sound::is_audio(p))
+                .collect(),
+            // No folder is the normal case before anyone adds music.
+            Err(_) => Vec::new(),
+        };
+        paths.sort();
+
+        let mut playlist = Playlist::new();
+        for path in paths {
+            match sound::load(&path) {
+                Ok(clip) => {
+                    println!(
+                        "music: {} ({:.0}:{:02.0})",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        (clip.seconds() / 60.0).floor(),
+                        clip.seconds() % 60.0
+                    );
+                    playlist.tracks.push(clip);
+                }
+                // One unreadable file should not cost the player the rest of
+                // their music.
+                Err(e) => eprintln!("music: {e}"),
+            }
+        }
+        playlist
+    }
+
+    pub fn len(&self) -> usize {
+        self.tracks.len()
+    }
+
+    /// The next stereo frame, advancing to the following track at the end of
+    /// each one and round to the first at the end of the list.
+    fn next_frame(&mut self, device_rate: f32) -> (f32, f32) {
+        if self.tracks.is_empty() {
+            return (0.0, 0.0);
+        }
+        // A track that failed to decode to anything would otherwise spin here.
+        let mut tried = 0;
+        while self.tracks[self.current].frames() < 2 {
+            self.current = (self.current + 1) % self.tracks.len();
+            self.frame = 0.0;
+            tried += 1;
+            if tried > self.tracks.len() {
+                return (0.0, 0.0);
+            }
+        }
+
+        let clip = &self.tracks[self.current];
+        let out = clip.sample(self.frame as f32);
+        self.frame += (clip.rate / device_rate) as f64;
+        if self.frame >= (clip.frames() - 1) as f64 {
+            self.current = (self.current + 1) % self.tracks.len();
+            self.frame = 0.0;
+        }
+        out
+    }
+}
+
 pub struct Mixer {
     rate: f32,
     scene: Scene,
@@ -103,10 +189,9 @@ pub struct Mixer {
     oneshots: Vec<OneShot>,
     next_oneshot: usize,
     music: Music,
-    /// A recorded track, if one was found. Present means the procedural bed
-    /// stands down.
-    music_clip: Option<wav::Clip>,
-    music_frame: f64,
+    /// Recorded music, if any was found. A non-empty playlist means the
+    /// generated bed stands down.
+    playlist: Playlist,
 }
 
 impl Mixer {
@@ -125,8 +210,7 @@ impl Mixer {
             oneshots: (0..MAX_ONESHOTS).map(|i| OneShot::new(seed32 ^ (0x200 + i as u32))).collect(),
             next_oneshot: 0,
             music: Music::new(seed),
-            music_clip: None,
-            music_frame: 0.0,
+            playlist: Playlist::new(),
         }
     }
 
@@ -149,27 +233,24 @@ impl Mixer {
         self.oneshots[slot].trigger(cue, strength);
     }
 
-    pub fn attach_music(&mut self, clip: wav::Clip) {
-        self.music_clip = Some(clip);
-        self.music_frame = 0.0;
+    // A single clip, for the tests. The game loads a folder.
+    #[allow(dead_code)]
+    pub fn attach_music(&mut self, clip: sound::Clip) {
+        self.playlist = Playlist { tracks: vec![clip], current: 0, frame: 0.0 };
+    }
+
+    pub fn attach_playlist(&mut self, playlist: Playlist) {
+        self.playlist = playlist;
     }
 
     fn music_sample(&mut self) -> (f32, f32) {
         let gain = self.levels.music * self.scene.music;
-        match self.music_clip.as_ref() {
-            Some(clip) if clip.frames() > 0 => {
-                let (l, r) = clip.sample(self.music_frame as f32);
-                self.music_frame += (clip.rate / self.rate) as f64;
-                if self.music_frame >= (clip.frames() - 1) as f64 {
-                    self.music_frame = 0.0;
-                }
-                (l * gain, r * gain)
-            }
-            _ => {
-                let m = self.music.render(gain, self.rate);
-                (m, m)
-            }
+        if self.playlist.len() > 0 {
+            let (l, r) = self.playlist.next_frame(self.rate);
+            return (l * gain, r * gain);
         }
+        let m = self.music.render(gain, self.rate);
+        (m, m)
     }
 
     /// Render `out` as interleaved frames of `channels`. Mono sums the pair;
@@ -408,16 +489,18 @@ impl Audio {
     /// Never fails. A machine with no sound card, or a device that refuses the
     /// stream, gets a silent `Audio` and a line on stderr - losing sound is not
     /// a reason to lose the race.
-    pub fn new(seed: u64, library: &Library) -> Audio {
+    pub fn new(seed: u64, music_folder: &std::path::Path) -> Audio {
         let rate = Self::device_rate();
         let mut mixer = Mixer::new(rate, seed);
 
-        if let Some(path) = library.path("music_race") {
-            match wav::load(path) {
-                Ok(clip) => mixer.attach_music(clip),
-                Err(e) => eprintln!("audio: {e}; using the generated music bed"),
-            }
+        let playlist = Playlist::load(music_folder);
+        if playlist.len() == 0 {
+            println!(
+                "music: nothing in {}, using the generated bed",
+                music_folder.display()
+            );
         }
+        mixer.attach_playlist(playlist);
 
         let mixer = Arc::new(Mutex::new(mixer));
         let mut audio = Audio {

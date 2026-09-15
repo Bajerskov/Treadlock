@@ -323,7 +323,7 @@ fn a_supplied_clip_takes_over_from_the_bed() {
     mixer.set_scene(Scene { rpm: 0.0, speed: 0.0, enclosure: 0.0, ..Scene::default() });
     // A short DC clip: nothing the synth would ever produce, so its presence in
     // the output is proof the file is what is playing.
-    mixer.attach_music(wav::Clip { samples: vec![0.5; 2_000], rate: RATE });
+    mixer.attach_music(sound::Clip { samples: vec![16_384i16; 2_000], rate: RATE });
 
     let mut out = vec![0.0f32; 4_800 * 2];
     mixer.render(&mut out, 2);
@@ -403,4 +403,111 @@ fn a_silent_audio_handle_still_mixes() {
     audio.render_block(&mut out, 2);
     assert!(out.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
     assert!(out.iter().any(|s| s.abs() > 0.01), "the silent handle rendered nothing at all");
+}
+
+/// A clip holding one constant value, so which track is playing is audible in
+/// the output rather than having to be inferred.
+#[cfg(test)]
+fn flat_clip(value: f32, frames: usize) -> sound::Clip {
+    sound::Clip {
+        samples: vec![(value * 32767.0) as i16; frames * 2],
+        rate: RATE,
+    }
+}
+
+/// Tracks play one after another and the list comes round again. A playlist
+/// that stopped after the last track would leave a long race in silence.
+#[test]
+fn the_playlist_advances_through_its_tracks_and_loops() {
+    let mut mixer = Mixer::new(RATE, 7);
+    mixer.levels = Levels { master: 1.0, music: 1.0, engine: 0.0, effects: 0.0, ambient: 0.0 };
+    mixer.set_scene(Scene { rpm: 0.0, speed: 0.0, enclosure: 0.0, ..Scene::default() });
+    // Three short tracks at three distinct levels.
+    mixer.attach_playlist(Playlist::from_tracks(vec![
+        flat_clip(0.2, 100),
+        flat_clip(0.5, 100),
+        flat_clip(0.8, 100),
+    ]));
+
+    // Read one frame at a time and note the level of each track as it arrives.
+    let mut heard = Vec::new();
+    let mut previous = -1.0f32;
+    for _ in 0..700 {
+        let mut frame = [0.0f32; 2];
+        mixer.render(&mut frame, 2);
+        let level = frame[0];
+        if (level - previous).abs() > 0.05 {
+            heard.push((level * 10.0).round() / 10.0);
+            previous = level;
+        }
+    }
+
+    assert!(
+        heard.len() >= 5,
+        "the playlist did not move through its tracks: heard {heard:?}"
+    );
+    // Compared as an ordering rather than as exact levels: the mixer soft
+    // clips, so 0.8 arrives as tanh(0.8). What matters is that the three
+    // tracks play in the order given and that the list comes round again.
+    assert!(
+        heard[0] < heard[1] && heard[1] < heard[2],
+        "tracks played out of order: {heard:?}"
+    );
+    assert!(
+        (heard[3] - heard[0]).abs() < 0.05,
+        "the playlist did not come round to the first track: {heard:?}"
+    );
+}
+
+/// With no music files the generated bed plays, and with them it does not.
+#[test]
+fn a_playlist_replaces_the_generated_bed() {
+    let render = |playlist: Playlist| {
+        let mut mixer = Mixer::new(RATE, 7);
+        mixer.levels = Levels { master: 1.0, music: 1.0, engine: 0.0, effects: 0.0, ambient: 0.0 };
+        mixer.set_scene(Scene { rpm: 0.0, speed: 0.0, enclosure: 0.0, ..Scene::default() });
+        mixer.attach_playlist(playlist);
+        let mut out = vec![0.0f32; 4_800 * 2];
+        mixer.render(&mut out, 2);
+        out.iter().sum::<f32>() / out.len() as f32
+    };
+
+    // A constant clip has a mean nothing the synth produces would have.
+    let supplied = render(Playlist::from_tracks(vec![flat_clip(0.5, 96_000)]));
+    assert!(supplied > 0.4, "the supplied track did not replace the bed (mean {supplied})");
+
+    let generated = render(Playlist::new());
+    assert!(generated.abs() < 0.1, "the generated bed has a DC offset ({generated})");
+}
+
+/// An empty or unreadable folder is the normal case before anyone adds music,
+/// and must not be an error.
+#[test]
+fn a_missing_music_folder_is_not_an_error() {
+    let playlist = Playlist::load(std::path::Path::new("definitely/not/here"));
+    assert_eq!(playlist.len(), 0);
+
+    let mut mixer = Mixer::new(RATE, 7);
+    mixer.attach_playlist(playlist);
+    let mut out = vec![0.0f32; 1_024 * 2];
+    mixer.render(&mut out, 2);
+    assert!(out.iter().all(|s| s.is_finite()));
+}
+
+/// A track that decoded to nothing must be stepped over rather than played
+/// forever as silence, or one bad file silences the rest of the album.
+#[test]
+fn an_empty_track_does_not_stall_the_playlist() {
+    let mut mixer = Mixer::new(RATE, 7);
+    mixer.levels = Levels { master: 1.0, music: 1.0, engine: 0.0, effects: 0.0, ambient: 0.0 };
+    mixer.set_scene(Scene { rpm: 0.0, speed: 0.0, enclosure: 0.0, ..Scene::default() });
+    mixer.attach_playlist(Playlist::from_tracks(vec![
+        sound::Clip { samples: Vec::new(), rate: RATE },
+        flat_clip(0.6, 200),
+    ]));
+
+    let mut out = vec![0.0f32; 2_048 * 2];
+    mixer.render(&mut out, 2);
+    let mean = out.iter().sum::<f32>() / out.len() as f32;
+    assert!(mean > 0.3, "an empty track stalled the playlist (mean {mean})");
 }

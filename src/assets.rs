@@ -191,7 +191,6 @@ mod tests {
             "boost_loop",
             "impact",
             "wind_ambient",
-            "music_race",
             "sky_gradient",
             "backdrop_far",
             "prop_pylon",

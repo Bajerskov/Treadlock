@@ -284,7 +284,7 @@ fn run(args: Args) {
     let mut input = input::Input::new();
     println!("gamepads: {}", input.gamepad_count());
 
-    let audio = audio::Audio::new(args.seed, &library);
+    let audio = audio::Audio::new(args.seed, &std::path::Path::new("assets").join("music"));
     let mut cues = audio::Cues::new();
 
     // Orientation at the start line, so a report of "it looks upside down" can

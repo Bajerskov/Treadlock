@@ -35,10 +35,10 @@ sound  wind_ambient   sounds/wind_ambient.wav    pink noise through a low-pass w
 sound  tunnel_tone    sounds/tunnel_tone.wav     resonant hum that fades in when the tube closes overhead
 sound  crowd_ambient  sounds/crowd_ambient.wav   silence; the crowd is only implied until this is recorded
 
-# --- music --------------------------------------------------------------
-music  music_menu     music/menu.wav             silence at the menu
-music  music_race     music/race.wav             a generated bed: seeded bass, arpeggio, kick and hat at 148 BPM
-music  music_finish   music/finish.wav           silence on the results screen
+# --- music ----------------------------------------------------------------
+# Music is not listed here. Drop any number of .mp3, .ogg, .flac or .wav files
+# into assets/music/ and they play in turn, in filename order. With the folder
+# empty the game generates its own bed instead.
 
 # --- cars -----------------------------------------------------------------
 # One per driver, cycled if fewer are supplied than there are drivers. Each

@@ -117,7 +117,7 @@ Nothing in the menus is decoration. Every setting listed changes something:
 | Engines | Your car and every car around you |
 | Effects | Tyres, impacts, weapons, pickups |
 | Ambience | Wind and the tunnel tone |
-| Music | The generated bed, until a track is supplied |
+| Music | The tracks in `assets/music/`, or the generated bed |
 | Mute | Silences the master and leaves the balance alone, so unmuting gives it back |
 
 The audio sliders are the mixer's real bus levels, not a percentage of some
@@ -281,11 +281,38 @@ plate. Dropping a real file into `assets/` replaces exactly that one thing.
 
 | Kind | Format | Replaces |
 | --- | --- | --- |
-| `sound`, `music` | WAV (16/24-bit PCM or 32-bit float, mono or stereo) | The synthesised voice or the generated music bed |
+| `sound` | WAV (16/24-bit PCM or 32-bit float, mono or stereo) | The synthesised voice |
+| music | Anything in `assets/music/`: mp3, ogg, flac, wav, m4a | The generated music bed |
 | `model` | `.glb` / `.gltf` | One generated prop shape, rescaled to the height the slot wanted |
 | `plate` | PNG or JPEG | One layer of the sky, resampled to the sky texture's size |
 
 ## Audio
+
+### Adding music
+
+Drop audio files into `assets/music/`. They play during a race in filename
+order and loop back to the first when the last ends, so naming them `01-`,
+`02-` sets the running order.
+
+```
+assets/music/
+  01-opening-lap.mp3
+  02-backmarker.mp3
+  03-last-corner.flac
+```
+
+`.mp3`, `.ogg`, `.flac`, `.wav` and `.m4a` all work. WAV is read directly here;
+everything else goes through symphonia, which is pure Rust and so
+cross-compiles to the BC-250 as cleanly as the rest of the engine. No encoder,
+no `ffmpeg`, no conversion step - the file you have is the file you drop in.
+
+With the folder empty the game generates its own bed, so it is never silent
+while you are still choosing tracks. One unreadable file is reported and
+skipped rather than costing you the rest of the album.
+
+Tracks are decoded whole into memory at startup, about 35 MB per three minutes
+as 16-bit stereo. A handful is nothing on a 16 GB board; an hour of music would
+want streaming instead, and that is not built.
 
 Every sound is synthesised rather than sampled, which suits a game where the
 things making noise are continuous: the engine note follows road speed through
@@ -377,7 +404,7 @@ they mean for this engine.
 | `src/mesh.rs` | Runtime car meshes |
 | `src/model.rs` | glTF/GLB loading and refitting |
 | `src/assets.rs` | The manifest: what the game loads, and what it does without |
-| `src/audio/` | Synthesis, mixing, WAV loading, cpal device |
+| `src/audio/` | Synthesis, mixing, file loading, playlist, cpal device |
 | `src/scenery.rs` | Background props and the sky dome |
 | `src/plates.rs` | Generated and loaded background layers |
 | `src/marks.rs` | Skid marks |

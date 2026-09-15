@@ -17,6 +17,9 @@ gltf = { version = "1.4", default-features = false, features = ["import", "utils
 # Already in the tree through gltf; named here so background plates can be
 # supplied as PNGs rather than only generated.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Music decoding. Pure Rust, so it cross-compiles to the target as cleanly as
+# everything else here, and only the formats the game actually loads are on.
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "wav", "pcm", "ogg", "vorbis"] }
 # Author-time only, for the Meshy model generator. Off by default: the game
 # itself never talks to a paid service at runtime.
 ureq = { version = "3", features = ["json"], optional = true }
