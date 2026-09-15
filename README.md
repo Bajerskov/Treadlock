@@ -45,7 +45,16 @@ cargo run --release -- --car car.glb   # use your own car model
 | Boost | Left Shift | A |
 | Handbrake | Space | B |
 | Respawn | R | Start |
+| Hand the car to the AI | P | - |
+| Orbit camera on/off | C | - |
+| Orbit / zoom, while orbiting | Drag / wheel | - |
 | Quit | Esc | - |
+
+`P` gives the player car to the same driver the opponents use, so what you are
+watching is the real racing line rather than a separate demo mode. Together
+with `C` that is how to inspect a car model: let the AI drive and orbit around
+it. The orbit camera is anchored to the car's own frame, so the car holds still
+on screen while the world turns around it.
 
 ### Headless mode
 

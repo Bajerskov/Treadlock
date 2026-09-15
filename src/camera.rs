@@ -9,11 +9,26 @@ use glam::{Mat4, Vec3};
 use crate::track::Track;
 use crate::vehicle::Vehicle;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Follows the car from behind. The racing view.
+    Chase,
+    /// Orbits the car in its own frame, so the car holds still on screen while
+    /// the world turns around it. That is what makes it an inspection view
+    /// rather than just a detached camera: you are looking at the model, not
+    /// at where it happens to be.
+    Orbit,
+}
+
 pub struct Camera {
     pub pos: Vec3,
     pub target: Vec3,
     pub up: Vec3,
     pub fov: f32,
+    pub mode: Mode,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
 }
 
 impl Camera {
@@ -23,7 +38,62 @@ impl Camera {
             target: v.pos,
             up: v.up(),
             fov: 70f32.to_radians(),
+            mode: Mode::Chase,
+            // Three-quarter view from behind and slightly above, which shows
+            // the most of a car in one look.
+            orbit_yaw: 0.7,
+            orbit_pitch: 0.30,
+            orbit_distance: 9.0,
         }
+    }
+
+    pub fn toggle_mode(&mut self) {
+        self.mode = match self.mode {
+            Mode::Chase => Mode::Orbit,
+            Mode::Orbit => Mode::Chase,
+        };
+    }
+
+    /// Drag deltas in pixels.
+    pub fn rotate(&mut self, dx: f32, dy: f32) {
+        self.orbit_yaw += dx * 0.008;
+        // Stop just short of the poles, where the up vector degenerates and the
+        // view snaps round.
+        self.orbit_pitch = (self.orbit_pitch + dy * 0.008).clamp(-1.45, 1.45);
+    }
+
+    /// Positive zooms in. Scaled by the current distance so it feels even at
+    /// both ends rather than crawling far out and lurching up close.
+    pub fn zoom(&mut self, amount: f32) {
+        self.orbit_distance = (self.orbit_distance * (1.0 - amount * 0.12)).clamp(2.5, 90.0);
+    }
+
+    pub fn update(&mut self, v: &Vehicle, track: &Track, dt: f32) {
+        match self.mode {
+            Mode::Chase => self.follow(v, track, dt),
+            Mode::Orbit => self.orbit(v, dt),
+        }
+    }
+
+    fn orbit(&mut self, v: &Vehicle, dt: f32) {
+        // The offset is built in the car's frame, so turning the car turns the
+        // world rather than sliding the car across the screen.
+        let (sy, cy) = self.orbit_yaw.sin_cos();
+        let (sp, cp) = self.orbit_pitch.sin_cos();
+        let local = Vec3::new(sy * cp, sp, cy * cp);
+        let desired = v.pos + v.rot * local * self.orbit_distance;
+
+        // Light smoothing only: an inspection camera should answer the mouse,
+        // not glide after it.
+        let blend = 1.0 - (-dt * 22.0).exp();
+        self.pos = self.pos.lerp(desired, blend);
+        self.target = self.target.lerp(v.pos, blend);
+        self.up = self.up.lerp(v.up(), blend).normalize_or(v.up());
+
+        // Back to a neutral lens: the speed-widened field of view is a driving
+        // effect and would distort what is being inspected.
+        let target_fov = 60f32.to_radians();
+        self.fov += (target_fov - self.fov) * blend;
     }
 
     pub fn follow(&mut self, v: &Vehicle, track: &Track, dt: f32) {
@@ -110,12 +180,10 @@ mod tests {
     /// clip y = +1 is up here too.
     #[test]
     fn world_up_projects_to_the_top_of_the_screen() {
-        let camera = Camera {
-            pos: Vec3::ZERO,
-            target: Vec3::NEG_Z * 10.0,
-            up: Vec3::Y,
-            fov: 70f32.to_radians(),
-        };
+        let mut camera = Camera::new(&Sim::new(7).player);
+        camera.pos = Vec3::ZERO;
+        camera.target = Vec3::NEG_Z * 10.0;
+        camera.up = Vec3::Y;
         let view_proj = camera.view_proj(16.0 / 9.0);
 
         let project = |p: Vec3| {
@@ -147,6 +215,52 @@ mod tests {
         assert!(
             clip_y(ground) < clip_y(sky),
             "the track surface projected above the tube interior, so the world is upside down"
+        );
+    }
+
+    /// Orbiting has to keep the car framed while moving the viewpoint around
+    /// it, and zoom has to actually change the distance. Otherwise it is not an
+    /// inspection camera, just a differently broken chase camera.
+    #[test]
+    fn orbit_circles_the_car_and_zooms() {
+        let mut sim = Sim::new(7);
+        sim.tick(&crate::vehicle::Controls::default(), TICK_DT);
+
+        let mut camera = Camera::new(&sim.player);
+        camera.toggle_mode();
+        assert!(camera.mode == Mode::Orbit);
+
+        // Settle, then record where it sits.
+        for _ in 0..200 {
+            camera.update(&sim.player, &sim.track, TICK_DT);
+        }
+        let start = camera.pos;
+        let start_distance = start.distance(sim.player.pos);
+
+        // A quarter turn should move the camera without changing its range.
+        camera.rotate(std::f32::consts::FRAC_PI_2 / 0.008 * 0.25, 0.0);
+        for _ in 0..200 {
+            camera.update(&sim.player, &sim.track, TICK_DT);
+        }
+        let turned = camera.pos;
+        assert!(
+            turned.distance(start) > 1.0,
+            "dragging did not move the camera"
+        );
+        assert!(
+            (turned.distance(sim.player.pos) - start_distance).abs() < 0.5,
+            "orbiting changed the range instead of the angle"
+        );
+        // The car stays centred throughout, which is the point of the mode.
+        assert!(camera.target.distance(sim.player.pos) < 0.5);
+
+        camera.zoom(4.0);
+        for _ in 0..200 {
+            camera.update(&sim.player, &sim.track, TICK_DT);
+        }
+        assert!(
+            camera.pos.distance(sim.player.pos) < start_distance - 1.0,
+            "zooming in did not get closer"
         );
     }
 

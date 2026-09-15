@@ -312,6 +312,55 @@ pub fn build_hud(ui: &mut Ui, sim: &Sim, width: f32, height: f32) {
     build_minimap(ui, sim, height, pad, scale);
 }
 
+/// Banner for the modes that change what the controls do, so it is never a
+/// mystery why steering does nothing or why the camera is not following.
+pub fn build_mode_banner(
+    ui: &mut Ui,
+    width: f32,
+    height: f32,
+    ai_driving: bool,
+    orbiting: bool,
+) {
+    if !ai_driving && !orbiting {
+        return;
+    }
+    let scale = (height / 360.0).max(1.0).floor();
+    let text_scale = scale * 2.0;
+
+    let mut parts: Vec<&str> = Vec::new();
+    if ai_driving {
+        parts.push("AI DRIVING");
+    }
+    if orbiting {
+        parts.push("ORBIT CAMERA");
+    }
+    let banner = parts.join("   ");
+
+    let text_w = Ui::text_width(&banner, text_scale);
+    let x = (width - text_w) * 0.5;
+    let y = height * 0.12;
+    ui.rect(
+        x - 8.0 * scale,
+        y - 5.0 * scale,
+        text_w + 16.0 * scale,
+        7.0 * text_scale + 10.0 * scale,
+        Vec4::new(0.05, 0.06, 0.10, 0.55),
+    );
+    ui.text_shadowed(x, y, text_scale, Vec4::new(1.0, 0.85, 0.3, 1.0), &banner);
+
+    if orbiting {
+        let hint = "DRAG TO ORBIT   WHEEL TO ZOOM   C TO EXIT";
+        let hint_scale = scale * 1.25;
+        ui.text_shadowed(
+            (width - Ui::text_width(hint, hint_scale)) * 0.5,
+            y + 7.0 * text_scale + 6.0 * scale,
+            hint_scale,
+            Vec4::new(0.7, 0.75, 0.85, 1.0),
+            hint,
+        );
+    }
+}
+
 /// Label each corner with its name. The whole overlay landing mirrored is a
 /// single sign in `pixel_to_ndc`, and this settles which way it should go in one
 /// look rather than by reading upside-down text and guessing.
@@ -451,7 +500,11 @@ mod tests {
     /// with silent holes in them.
     #[test]
     fn hud_text_is_fully_covered_by_the_font() {
-        for text in ["KM/H", "LAP", "BEST", "CUR", "YOU", "CPU", "P1", "/6", "0123456789", ":.-/M K"] {
+        for text in [
+            "KM/H", "LAP", "BEST", "CUR", "YOU", "CPU", "P1", "/6", "0123456789", ":.-/M K",
+            "AI DRIVING", "ORBIT CAMERA", "DRAG TO ORBIT   WHEEL TO ZOOM   C TO EXIT",
+            "TOP LEFT", "TOP RIGHT", "BOTTOM LEFT", "BOTTOM RIGHT",
+        ] {
             for c in text.chars() {
                 assert!(
                     glyph_slot(c).is_some(),

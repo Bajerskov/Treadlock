@@ -220,6 +220,11 @@ fn run(args: Args) {
         &ui::build_atlas(),
     );
     let mut hud = ui::Ui::default();
+    // Hand the player car to the same driver the opponents use, for watching
+    // the car from outside while it races.
+    let mut ai_driving = false;
+    let mut dragging = false;
+    let mut last_cursor: Option<glam::Vec2> = None;
 
     let mut particles = particles::Particles::new();
     let mut camera = Camera::new(&sim.player);
@@ -275,6 +280,21 @@ fn run(args: Args) {
                                 sim.player.respawn(&sim.track);
                                 camera.snap(&sim.player, &sim.track);
                             }
+                            KeyCode::KeyP if pressed => {
+                                ai_driving = !ai_driving;
+                                println!(
+                                    "player car: {}",
+                                    if ai_driving { "AI" } else { "manual" }
+                                );
+                            }
+                            KeyCode::KeyC if pressed => {
+                                camera.toggle_mode();
+                                // Snapping on the way back avoids a long sweep
+                                // in from wherever the orbit left the camera.
+                                if camera.mode == camera::Mode::Chase {
+                                    camera.snap(&sim.player, &sim.track);
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -289,8 +309,17 @@ fn run(args: Args) {
                         sim.player.respawn(&sim.track);
                         camera.snap(&sim.player, &sim.track);
                     }
-                    sim.update(&input.controls(), dt);
-                    camera.follow(&sim.player, &sim.track, dt);
+                    // Under AI the player car takes the same driver the
+                    // opponents use, so what you are watching is the real
+                    // racing line rather than a separate demo mode.
+                    let controls = if ai_driving {
+                        let lookahead = 26.0 + sim.player.speed() * 0.12;
+                        vehicle::autopilot_lane(&sim.track, &sim.player, lookahead, 0.0)
+                    } else {
+                        input.controls()
+                    };
+                    sim.update(&controls, dt);
+                    camera.update(&sim.player, &sim.track, dt);
 
                     if renderer.needs_resize {
                         let size = window.inner_size();
@@ -319,6 +348,13 @@ fn run(args: Args) {
                     let (screen_w, screen_h) =
                         (swapchain.extent.width as f32, swapchain.extent.height as f32);
                     ui::build_hud(&mut hud, &sim, screen_w, screen_h);
+                    ui::build_mode_banner(
+                        &mut hud,
+                        screen_w,
+                        screen_h,
+                        ai_driving,
+                        camera.mode == camera::Mode::Orbit,
+                    );
                     if args.debug_hud {
                         ui::build_orientation_markers(&mut hud, screen_w, screen_h);
                     }
@@ -349,6 +385,32 @@ fn run(args: Args) {
                         frames = 0;
                         fps_timer = Instant::now();
                     }
+                }
+                // Drag to orbit, wheel to zoom. Only while orbiting, so a stray
+                // mouse movement cannot disturb the racing camera.
+                WindowEvent::MouseInput { state, button, .. } => {
+                    if button == winit::event::MouseButton::Left {
+                        dragging = state == ElementState::Pressed;
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    let current = glam::Vec2::new(position.x as f32, position.y as f32);
+                    if let Some(previous) = last_cursor {
+                        if dragging && camera.mode == camera::Mode::Orbit {
+                            let delta = current - previous;
+                            camera.rotate(delta.x, delta.y);
+                        }
+                    }
+                    last_cursor = Some(current);
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    // A wheel notch and a trackpad scroll arrive in different
+                    // units; normalise so both zoom at a usable rate.
+                    let amount = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                    };
+                    camera.zoom(amount);
                 }
                 _ => {}
             },
