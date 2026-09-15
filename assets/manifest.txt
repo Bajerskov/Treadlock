@@ -1,0 +1,47 @@
+# Treadlock asset manifest.
+#
+#   kind  id  relative/path  what happens when the file is missing
+#
+# Nothing here is required to run the game. Every line names a fallback that is
+# generated at runtime, so the game stays playable while the real asset is being
+# made. `--assets` prints which ones are still outstanding.
+#
+# kinds: sound  music  model  plate
+
+# --- vehicle ------------------------------------------------------------
+sound  engine_idle    sounds/engine_idle.wav     synthesised sawtooth drone, pitched by engine rpm
+sound  engine_drive   sounds/engine_drive.wav    synthesised harmonic stack, crossfaded in above quarter throttle
+sound  engine_boost   sounds/engine_boost.wav    the drive layer detuned upward with added noise
+sound  tyre_screech   sounds/tyre_screech.wav    band-passed noise, gain and centre frequency from tyre slip
+sound  whoosh_by      sounds/whoosh_by.wav       noise burst swept by a resonant filter, panned and doppler-shifted past the camera
+sound  impact         sounds/impact.wav          short noise transient with a low thump, scaled by collision energy
+sound  suspension     sounds/suspension.wav      filtered click on hard suspension compression
+sound  respawn        sounds/respawn.wav         descending then rising sine sweep
+
+# --- pickups and power ups ----------------------------------------------
+sound  boost_pickup   sounds/boost_pickup.wav    rising sine arpeggio over a noise swell
+sound  boost_loop     sounds/boost_loop.wav      low square drone held for the duration of the boost
+sound  pad_charge     sounds/pad_charge.wav      quiet pulse from a boost pad, in earshot but not yet driven over
+
+# --- ambience -----------------------------------------------------------
+sound  wind_ambient   sounds/wind_ambient.wav    pink noise through a low-pass whose cutoff rides car speed
+sound  tunnel_tone    sounds/tunnel_tone.wav     resonant hum that fades in when the tube closes overhead
+sound  crowd_ambient  sounds/crowd_ambient.wav   silence; the crowd is only implied until this is recorded
+
+# --- music --------------------------------------------------------------
+music  music_menu     music/menu.ogg             silence at the menu
+music  music_race     music/race.ogg             silence during the race
+music  music_finish   music/finish.ogg           silence on the results screen
+
+# --- scenery models -----------------------------------------------------
+model  prop_pylon     models/pylon.glb           generated tapered box pylon
+model  prop_arch      models/arch.glb            generated gateway arch swept over the track
+model  prop_tower     models/tower.glb           generated stepped tower block
+model  prop_billboard models/billboard.glb       generated flat panel on two legs
+model  prop_antenna   models/antenna.glb         generated thin mast with a crossbar
+
+# --- background plates --------------------------------------------------
+plate  sky_gradient   plates/sky.png             vertical gradient generated from the track seed
+plate  backdrop_far   plates/backdrop_far.png    generated silhouette ridge line on the horizon
+plate  backdrop_near  plates/backdrop_near.png   generated darker silhouette band, parallaxed closer
+plate  cloud_band     plates/clouds.png          generated soft noise band drifting across the sky

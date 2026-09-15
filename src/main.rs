@@ -1,3 +1,4 @@
+mod assets;
 mod camera;
 mod effects;
 mod gfx;
@@ -101,6 +102,12 @@ fn main() {
             let spirv = gfx::shader::compile(source);
             println!("{name} compiled: {} words of SPIR-V", spirv.len());
         }
+        return;
+    }
+    // The asset library is inspectable without launching anything, so "what is
+    // still missing?" is a command rather than something to remember.
+    if std::env::args().any(|a| a == "--assets") {
+        assets::Library::load("assets").report(true);
         return;
     }
     // Loading and refitting a model needs no GPU either, so a file can be
