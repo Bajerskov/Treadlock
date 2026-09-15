@@ -52,7 +52,17 @@ pub struct Sim {
     lap_start: f32,
     prev_distance: f32,
     accumulator: f32,
+    /// Seconds spent travelling against the track. Accumulating time rather
+    /// than testing an instant is what keeps a spin or a bad landing from
+    /// flashing a warning at someone who is still going the right way.
+    wrong_way_timer: f32,
 }
+
+/// Closing speed against the track, below which travel counts as backwards.
+/// Well clear of zero so nudging out of a wall does not register.
+const WRONG_WAY_SPEED: f32 = 4.0;
+/// How long that has to persist before the warning appears.
+const WRONG_WAY_DELAY: f32 = 0.7;
 
 impl Sim {
     pub fn new(seed: u64) -> Sim {
@@ -90,7 +100,13 @@ impl Sim {
             lap_start: 0.0,
             prev_distance,
             accumulator: 0.0,
+            wrong_way_timer: 0.0,
         }
+    }
+
+    /// True once the car has been travelling backwards long enough to mean it.
+    pub fn wrong_way(&self) -> bool {
+        self.wrong_way_timer >= WRONG_WAY_DELAY
     }
 
     /// Advance by real elapsed time, consuming it in fixed ticks.
@@ -128,6 +144,7 @@ impl Sim {
 
         self.resolve_car_contacts();
         self.time += dt;
+        self.update_wrong_way(dt);
 
         let d = self.player.distance;
         let len = self.track.length;
@@ -150,6 +167,122 @@ impl Sim {
 mod tests {
     use super::*;
     use crate::vehicle::autopilot;
+
+    /// Get clear of the starting grid before testing anything about direction.
+    /// The pack launches together, and a car trying to reverse out of it is
+    /// being shoved forward by five others - which measures contact, not
+    /// direction.
+    fn clear_of_the_grid(seed: u64) -> Sim {
+        let mut sim = Sim::new(seed);
+        for _ in 0..(6.0 / TICK_DT) as usize {
+            let controls = autopilot(&sim.track, &sim.player, 26.0);
+            sim.tick(&controls, TICK_DT);
+        }
+        sim
+    }
+
+    /// Driving back down the track has to raise the warning, promptly.
+    #[test]
+    fn reversing_down_the_track_warns() {
+        let mut sim = clear_of_the_grid(7);
+        let started = sim.time;
+
+        let surf = sim.track.surface(sim.player.pos, sim.player.hint);
+        sim.player.rot = crate::track::look_rotation(-surf.tangent, -surf.down);
+        sim.player.vel = -surf.tangent * 20.0;
+        let controls = Controls { throttle: 1.0, ..Controls::default() };
+
+        let mut warned_after = None;
+        for _ in 0..(5.0 / TICK_DT) as usize {
+            sim.tick(&controls, TICK_DT);
+            if sim.wrong_way() {
+                warned_after = Some(sim.time - started);
+                break;
+            }
+        }
+        let Some(delay) = warned_after else {
+            panic!("drove backwards for five seconds without a warning");
+        };
+        assert!(delay >= WRONG_WAY_DELAY, "warned after only {delay:.2}s");
+        assert!(delay < 1.5, "took {delay:.2}s to notice");
+    }
+
+    /// The half that matters: a warning that cries wolf during a drift or after
+    /// a landing is worse than none, because drivers learn to ignore it.
+    ///
+    /// It does not assert the warning never fires - the autopilot genuinely
+    /// does get turned around occasionally, and warning then is correct. What
+    /// it pins is that the warning is rare, and never shows while the car is
+    /// actually travelling forwards.
+    #[test]
+    fn racing_forwards_barely_ever_warns() {
+        for seed in [1u64, 7, 42] {
+            let mut sim = Sim::new(seed);
+            let ticks = (120.0 / TICK_DT) as usize;
+            let mut warned = 0usize;
+
+            for _ in 0..ticks {
+                let controls = autopilot(&sim.track, &sim.player, 26.0);
+                sim.tick(&controls, TICK_DT);
+
+                if sim.wrong_way() {
+                    warned += 1;
+                    let surf = sim.track.surface(sim.player.pos, sim.player.hint);
+                    let along = sim.player.vel.dot(surf.tangent);
+                    // A little forward motion is allowed: the warning fades out
+                    // rather than snapping off, so it can still be up in the
+                    // moment after the car turns around. Making real progress
+                    // down the track while being told to turn round is the bug.
+                    assert!(
+                        along < WRONG_WAY_SPEED,
+                        "seed {seed}: warned while travelling forwards at {along:.1} m/s"
+                    );
+                }
+            }
+            let share = warned as f32 / ticks as f32 * 100.0;
+            assert!(share < 3.0, "seed {seed}: warned for {share:.1}% of a clean run");
+        }
+    }
+
+    /// Turning back round has to clear it, and quickly, however long the driver
+    /// spent going the wrong way.
+    #[test]
+    fn turning_around_clears_the_warning() {
+        let mut sim = clear_of_the_grid(7);
+
+        let surf = sim.track.surface(sim.player.pos, sim.player.hint);
+        sim.player.rot = crate::track::look_rotation(-surf.tangent, -surf.down);
+        sim.player.vel = -surf.tangent * 25.0;
+        let reverse = Controls { throttle: 1.0, ..Controls::default() };
+
+        // Several times the cap, so an uncapped timer would have banked plenty,
+        // but not so long that the car reverses into a wall and stops.
+        for _ in 0..(4.0 / TICK_DT) as usize {
+            sim.tick(&reverse, TICK_DT);
+        }
+        assert!(sim.wrong_way(), "never warned in the first place");
+
+        let surf = sim.track.surface(sim.player.pos, sim.player.hint);
+        sim.player.rot = crate::track::look_rotation(surf.tangent, -surf.down);
+        sim.player.vel = surf.tangent * 25.0;
+
+        let turned = sim.time;
+        let mut cleared_after = None;
+        for _ in 0..(3.0 / TICK_DT) as usize {
+            sim.tick(&reverse, TICK_DT);
+            if !sim.wrong_way() {
+                cleared_after = Some(sim.time - turned);
+                break;
+            }
+        }
+        let Some(delay) = cleared_after else {
+            panic!("warning stayed up for three seconds after turning around");
+        };
+        // Tight on purpose: without the cap on the timer, four seconds spent
+        // backwards banks four seconds of warning, and this takes well over a
+        // second to clear. That is the bug this number exists to catch.
+        assert!(delay < 1.0, "took {delay:.2}s to clear after turning around");
+    }
 
     /// Opponents have to actually race: complete laps, spread across the track
     /// rather than stacking on one line, and never end up inside each other.
@@ -338,6 +471,28 @@ impl Sim {
                     self.opponents[j].car.vel -= exchange;
                 }
             }
+        }
+    }
+
+    /// Track how long the car has been going the wrong way.
+    ///
+    /// Judged on where the car is *travelling*, not where it is pointing. A car
+    /// sideways in a drift, or spinning after a landing, is facing every
+    /// direction in turn while still moving down the track, and warning it then
+    /// would be both wrong and maddening.
+    fn update_wrong_way(&mut self, dt: f32) {
+        let surf = self.track.surface(self.player.pos, self.player.hint);
+        let along = self.player.vel.dot(surf.tangent);
+
+        if along < -WRONG_WAY_SPEED {
+            // Capped, or a long stint backwards banks time the warning then
+            // takes just as long to spend, leaving it up well after the driver
+            // has turned around.
+            self.wrong_way_timer = (self.wrong_way_timer + dt).min(WRONG_WAY_DELAY + 0.3);
+        } else {
+            // Clears faster than it builds, so turning round dismisses the
+            // warning promptly rather than leaving it hanging.
+            self.wrong_way_timer = (self.wrong_way_timer - dt * 2.5).max(0.0);
         }
     }
 

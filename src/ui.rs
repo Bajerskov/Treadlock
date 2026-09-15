@@ -312,6 +312,42 @@ pub fn build_hud(ui: &mut Ui, sim: &Sim, width: f32, height: f32) {
     build_minimap(ui, sim, height, pad, scale);
 }
 
+/// Wrong-way warning. Sits above centre rather than across it: the driver needs
+/// to see the track to turn around, so the warning must not cover the one thing
+/// it is asking them to look at.
+pub fn build_wrong_way(ui: &mut Ui, width: f32, height: f32, time: f32) {
+    let scale = (height / 360.0).max(1.0).floor();
+    let text_scale = scale * 3.5;
+
+    // Pulsing, because a static banner stops registering after a second or two.
+    let pulse = 0.55 + 0.45 * (time * 9.0).sin();
+    let red = Vec4::new(1.0, 0.25 + 0.15 * pulse, 0.15, 1.0);
+
+    let title = "WRONG WAY";
+    let title_w = Ui::text_width(title, text_scale);
+    let x = (width - title_w) * 0.5;
+    let y = height * 0.26;
+
+    ui.rect(
+        x - 10.0 * scale,
+        y - 6.0 * scale,
+        title_w + 20.0 * scale,
+        7.0 * text_scale + 12.0 * scale,
+        Vec4::new(0.25, 0.02, 0.02, 0.35 + 0.25 * pulse),
+    );
+    ui.text_shadowed(x, y, text_scale, red, title);
+
+    let sub = "TURN AROUND";
+    let sub_scale = scale * 1.75;
+    ui.text_shadowed(
+        (width - Ui::text_width(sub, sub_scale)) * 0.5,
+        y + 7.0 * text_scale + 6.0 * scale,
+        sub_scale,
+        Vec4::new(1.0, 0.8, 0.7, 1.0),
+        sub,
+    );
+}
+
 /// Banner for the modes that change what the controls do, so it is never a
 /// mystery why steering does nothing or why the camera is not following.
 pub fn build_mode_banner(
@@ -503,6 +539,7 @@ mod tests {
         for text in [
             "KM/H", "LAP", "BEST", "CUR", "YOU", "CPU", "P1", "/6", "0123456789", ":.-/M K",
             "AI DRIVING", "ORBIT CAMERA", "DRAG TO ORBIT   WHEEL TO ZOOM   C TO EXIT",
+            "WRONG WAY", "TURN AROUND",
             "TOP LEFT", "TOP RIGHT", "BOTTOM LEFT", "BOTTOM RIGHT",
         ] {
             for c in text.chars() {

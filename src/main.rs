@@ -348,6 +348,9 @@ fn run(args: Args) {
                     let (screen_w, screen_h) =
                         (swapchain.extent.width as f32, swapchain.extent.height as f32);
                     ui::build_hud(&mut hud, &sim, screen_w, screen_h);
+                    if sim.wrong_way() {
+                        ui::build_wrong_way(&mut hud, screen_w, screen_h, sim.time);
+                    }
                     ui::build_mode_banner(
                         &mut hud,
                         screen_w,
