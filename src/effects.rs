@@ -199,5 +199,95 @@ pub fn update(
         });
     }
 
+    // Rocket trails. Emitted from the rocket rather than from the car that
+    // fired it, so a rocket curving away round a bend takes its smoke with it.
+    for rocket in &sim.weapons.rockets {
+        let at = rocket.pos;
+        let back = -rocket.vel.normalize_or_zero();
+        particles.emit_rate(slot::ROCKET, 160.0, dt, |rng| Emit {
+            pos: at + rng.direction() * 0.3,
+            vel: back * rng.range(4.0, 14.0) + rng.direction() * 2.0,
+            life: rng.range(0.25, 0.6),
+            size: rng.range(0.4, 0.9),
+            end_size: 2.2,
+            color: Vec3::new(2.0, 0.9, 0.35),
+            end_color: Vec3::new(0.18, 0.10, 0.10),
+            drag: 3.0,
+            gravity: Vec3::ZERO,
+        });
+    }
+
+    // A live shield, as a shell of sparks around the car. Additive points on a
+    // sphere rather than a translucent hull, which would need its own blending
+    // pass to do badly what this does cheaply.
+    for (index, car) in std::iter::once(&sim.player)
+        .chain(sim.opponents.iter().map(|o| &o.car))
+        .enumerate()
+    {
+        if car.shield <= 0.0 {
+            continue;
+        }
+        let at = car.pos;
+        let vel = car.vel;
+        // Flickers faster as it runs out, so the driver can hear the clock on
+        // it without reading the HUD.
+        let urgency = 1.0 + 2.0 * (1.0 - (car.shield / 7.0).clamp(0.0, 1.0));
+        let _ = index;
+        particles.emit_rate(slot::SHIELD, 90.0 * urgency, dt, |rng| {
+            let shell = rng.direction().normalize_or(Vec3::Y) * 3.2;
+            Emit {
+                pos: at + shell,
+                vel: vel * 0.98 + shell * 0.4,
+                life: rng.range(0.10, 0.22),
+                size: rng.range(0.16, 0.34),
+                end_size: 0.02,
+                color: Vec3::new(0.35, 1.1, 1.9),
+                end_color: Vec3::new(0.05, 0.25, 0.6),
+                drag: 0.5,
+                gravity: Vec3::ZERO,
+            }
+        });
+    }
+
+    // One burst per weapon event. Reading the sim's event list rather than
+    // re-deriving what happened keeps the effect and the hit in step: if the
+    // sim says a shield ate it, that is what gets drawn.
+    for event in &sim.weapons.events {
+        match *event {
+            crate::weapons::Event::Struck { pos, .. } => {
+                particles.burst(90, |rng| Emit {
+                    pos: pos + rng.direction() * 1.2,
+                    vel: rng.direction() * rng.range(6.0, 34.0),
+                    life: rng.range(0.25, 0.8),
+                    size: rng.range(0.5, 1.5),
+                    end_size: 0.05,
+                    color: Vec3::new(2.4, 1.1, 0.35),
+                    end_color: Vec3::new(0.25, 0.10, 0.06),
+                    drag: 2.6,
+                    gravity: Vec3::ZERO,
+                });
+            }
+            crate::weapons::Event::Blocked { pos, .. } => {
+                // Cold and outward: a shield breaking should never be mistaken
+                // for taking the hit.
+                particles.burst(70, |rng| {
+                    let shell = rng.direction().normalize_or(Vec3::Y);
+                    Emit {
+                        pos: pos + shell * 3.2,
+                        vel: shell * rng.range(8.0, 20.0),
+                        life: rng.range(0.2, 0.5),
+                        size: rng.range(0.3, 0.7),
+                        end_size: 0.03,
+                        color: Vec3::new(0.5, 1.6, 2.4),
+                        end_color: Vec3::new(0.05, 0.3, 0.7),
+                        drag: 3.0,
+                        gravity: Vec3::ZERO,
+                    }
+                });
+            }
+            crate::weapons::Event::Collected { .. } | crate::weapons::Event::Fired { .. } => {}
+        }
+    }
+
     particles.update(dt);
 }

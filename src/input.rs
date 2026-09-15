@@ -14,6 +14,7 @@ pub struct Keys {
     pub right: bool,
     pub boost: bool,
     pub handbrake: bool,
+    pub fire: bool,
 }
 
 pub struct Input {
@@ -30,6 +31,7 @@ struct PadState {
     brake: f32,
     boost: bool,
     handbrake: bool,
+    fire: bool,
     respawn: bool,
     connected: bool,
 }
@@ -74,6 +76,7 @@ impl Input {
             steer: key_steer,
             boost: self.keys.boost,
             handbrake: self.keys.handbrake,
+            fire: self.keys.fire,
         };
 
         if self.pad_state.connected {
@@ -85,6 +88,7 @@ impl Input {
             c.brake = c.brake.max(p.brake);
             c.boost |= p.boost;
             c.handbrake |= p.handbrake;
+            c.fire |= p.fire;
         }
         c
     }
@@ -111,6 +115,8 @@ mod evdev {
     const ABS_RZ: u16 = 0x05;
     const BTN_SOUTH: u16 = 0x130;
     const BTN_EAST: u16 = 0x131;
+    /// The X button on an Xbox pad: fire.
+    const BTN_WEST: u16 = 0x134;
     const BTN_START: u16 = 0x13b;
 
     /// `struct input_event` on 64-bit Linux: two 64-bit timeval fields, then
@@ -276,6 +282,10 @@ mod evdev {
                         }
                         BTN_EAST => {
                             state.handbrake = pressed;
+                            state.connected = true;
+                        }
+                        BTN_WEST => {
+                            state.fire = pressed;
                             state.connected = true;
                         }
                         BTN_START => {

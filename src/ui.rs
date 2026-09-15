@@ -308,8 +308,64 @@ pub fn build_hud(ui: &mut Ui, sim: &Sim, width: f32, height: f32) {
         &format!("BEST {}", seconds_to_clock(sim.best_lap_time)),
     );
 
+    build_weapon(ui, sim, width, height, pad, scale);
     build_standings(ui, sim, width, pad, scale);
     build_minimap(ui, sim, height, pad, scale);
+}
+
+/// What the player is holding, and whether a shield is up.
+///
+/// Bottom centre, where it is in view without being read: a weapon slot is
+/// glanced at, not studied, and the eye is already near the middle of the road.
+fn build_weapon(ui: &mut Ui, sim: &Sim, width: f32, height: f32, pad: f32, scale: f32) {
+    let slot_scale = scale * 2.0;
+    let held = sim.weapons.held.first().copied().flatten();
+    let label = held.map_or("", |w| w.name());
+    let box_w = Ui::text_width("SHIELD", slot_scale) + 12.0 * scale;
+    let box_h = 7.0 * slot_scale + 8.0 * scale;
+    let box_x = (width - box_w) * 0.5;
+    let box_y = height - pad - box_h;
+
+    // An empty slot still draws its outline, so the player learns where to look
+    // before they have anything to look at.
+    ui.rect(box_x, box_y, box_w, box_h, Vec4::new(0.06, 0.08, 0.12, 0.72));
+    if let Some(weapon) = held {
+        let colour = match weapon {
+            crate::weapons::Weapon::Rocket => Vec4::new(1.0, 0.55, 0.25, 1.0),
+            crate::weapons::Weapon::Mine => Vec4::new(1.0, 0.30, 0.30, 1.0),
+            crate::weapons::Weapon::Shield => Vec4::new(0.40, 0.85, 1.0, 1.0),
+            crate::weapons::Weapon::Shock => Vec4::new(0.85, 0.70, 1.0, 1.0),
+        };
+        ui.text_shadowed(
+            (width - Ui::text_width(label, slot_scale)) * 0.5,
+            box_y + 4.0 * scale,
+            slot_scale,
+            colour,
+            label,
+        );
+    } else {
+        let small = scale * 1.5;
+        ui.text_shadowed(
+            (width - Ui::text_width("EMPTY", small)) * 0.5,
+            box_y + (box_h - 7.0 * small) * 0.5,
+            small,
+            Vec4::new(0.35, 0.38, 0.45, 1.0),
+            "EMPTY",
+        );
+    }
+
+    // A live shield gets its own line above the slot, because it is the one
+    // piece of state that changes what a hit does.
+    if sim.player.shield > 0.0 {
+        let small = scale * 1.5;
+        ui.text_shadowed(
+            (width - Ui::text_width("SHIELD UP", small)) * 0.5,
+            box_y - 9.0 * small,
+            small,
+            Vec4::new(0.40, 0.90, 1.0, 1.0),
+            "SHIELD UP",
+        );
+    }
 }
 
 /// Wrong-way warning. Sits above centre rather than across it: the driver needs
@@ -540,6 +596,7 @@ mod tests {
             "KM/H", "LAP", "BEST", "CUR", "YOU", "CPU", "P1", "/6", "0123456789", ":.-/M K",
             "AI DRIVING", "ORBIT CAMERA", "DRAG TO ORBIT   WHEEL TO ZOOM   C TO EXIT",
             "WRONG WAY", "TURN AROUND",
+            "ROCKET", "MINE", "SHIELD", "SHOCK", "EMPTY", "SHIELD UP",
             "TOP LEFT", "TOP RIGHT", "BOTTOM LEFT", "BOTTOM RIGHT",
         ] {
             for c in text.chars() {

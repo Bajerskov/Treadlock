@@ -14,7 +14,7 @@ use crate::track::{look_rotation, Track};
 /// Arcade gravity. Well above 9.81 so jumps land fast and the car feels planted
 /// rather than floaty.
 const GRAVITY: f32 = 24.0;
-const MASS: f32 = 950.0;
+pub const MASS: f32 = 950.0;
 /// Chassis half-extents (x = half width, y = half height, z = half length).
 /// Public so model fitting can size art against the body that actually collides.
 pub const HALF_EXTENTS: Vec3 = Vec3::new(1.15, 0.45, 2.1);
@@ -46,6 +46,8 @@ pub struct Controls {
     pub steer: f32,
     pub boost: bool,
     pub handbrake: bool,
+    /// Fire the held weapon. Read by the arsenal, not by the physics step.
+    pub fire: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -97,6 +99,10 @@ pub struct Vehicle {
     pub pad_boost: f32,
     /// Set for one tick when a pad fires, for effects to pick up.
     pub pad_triggered: bool,
+    /// Seconds of disruption left after taking a hit: no drive, less grip.
+    pub stun: f32,
+    /// Seconds of shield left. Absorbs one hit and is spent doing so.
+    pub shield: f32,
     /// Arc length along the track, used for lap and placement logic.
     pub distance: f32,
 }
@@ -127,6 +133,8 @@ impl Vehicle {
             contacts: 0,
             pad_boost: 0.0,
             pad_triggered: false,
+            stun: 0.0,
+            shield: 0.0,
             distance: 0.0,
         }
     }
@@ -182,6 +190,9 @@ impl Vehicle {
             force -= self.vel / speed * (DRAG * speed * speed);
         }
         force += body.down * (DOWNFORCE * speed * speed);
+
+        self.stun = (self.stun - dt).max(0.0);
+        self.shield = (self.shield - dt).max(0.0);
 
         // Boost pads. Only count while the car is actually on the surface, so a
         // pad cannot be collected by flying over it.
@@ -262,7 +273,11 @@ impl Vehicle {
             let lat_scale = if controls.handbrake && !wheel.steers { 0.22 } else { 1.0 };
             let mut tyre = -side * (lat_vel * LATERAL_GRIP * lat_scale);
 
-            if wheel.powered {
+            // A stunned car keeps its wheels and its steering but loses drive,
+            // so a hit costs you places rather than taking the car away. In a
+            // game where being upside down is survivable, being shot should be
+            // too.
+            if wheel.powered && self.stun <= 0.0 {
                 let drive = if controls.boost && self.boost > 0.0 { BOOST_FORCE } else { ENGINE_FORCE };
                 tyre += fwd * (drive * controls.throttle.clamp(0.0, 1.0) * 0.5);
             }
@@ -376,6 +391,9 @@ impl Vehicle {
         self.vel = f.tangent * self.vel.length().min(40.0);
         self.ang_vel = Vec3::ZERO;
         self.hint = i;
+        // A respawn is a reset, not a rescue from being shot: the shield is
+        // not restored, but there is no sense respawning already helpless.
+        self.stun = 0.0;
     }
 }
 
@@ -416,6 +434,9 @@ pub fn autopilot_lane(track: &Track, v: &Vehicle, lookahead: f32, lane: f32) -> 
         steer,
         boost: facing > 0.5 && v.speed() < 90.0,
         handbrake: false,
+        // The AI decides its own shots in the arsenal, where it can see the
+        // whole field; the autopilot only drives.
+        fire: false,
     }
 }
 

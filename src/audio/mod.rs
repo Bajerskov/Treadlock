@@ -345,6 +345,29 @@ impl Cues {
             }
         }
 
+        // Weapons report what happened rather than being re-derived here, so
+        // the sound and the sim cannot disagree about whether a shield held.
+        for event in &sim.weapons.events {
+            match *event {
+                crate::weapons::Event::Collected { driver: 0, .. } => {
+                    audio.fire(Cue::WeaponPickup, 1.0)
+                }
+                crate::weapons::Event::Fired { weapon, .. } => match weapon {
+                    crate::weapons::Weapon::Rocket => audio.fire(Cue::RocketLaunch, 1.0),
+                    crate::weapons::Weapon::Shield => audio.fire(Cue::ShieldUp, 1.0),
+                    // A mine going down and a shock going off are both quiet at
+                    // the moment of use; what they do is heard when it lands.
+                    _ => {}
+                },
+                // Everyone's hits are audible, not only the player's: half of
+                // knowing where you are in a race is hearing it happen to
+                // someone else.
+                crate::weapons::Event::Struck { .. } => audio.fire(Cue::Explosion, 1.0),
+                crate::weapons::Event::Blocked { .. } => audio.fire(Cue::ShieldBreak, 1.0),
+                _ => {}
+            }
+        }
+
         self.velocity = car.vel;
         self.pad_boost = car.pad_boost;
         self.compression = compression;

@@ -118,6 +118,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var albedo = pc.tint.rgb * sampled.rgb;
     var emissive = vec3<f32>(0.0);
 
+    if (pc.params.x > 4.5) {
+        // Weapon props: crates, rockets, mines. Lit flatly and mostly emissive,
+        // because they have to be picked out against a busy track at speed and
+        // read the same whether they are on the floor, the wall or the ceiling.
+        let ndl = dot(n, l) * 0.5 + 0.5;
+        let pulse = 0.75 + 0.25 * sin(frame.sun.w * 6.0 + pc.params.y * 10.0);
+        let rim = pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 2.0);
+        var colour = albedo * (0.35 + 0.45 * ndl) + albedo * (pulse * 1.6 + rim * 1.2);
+        let fade = 1.0 - exp(-dist * frame.fog.a);
+        return vec4<f32>(mix(colour, frame.fog.rgb, clamp(fade, 0.0, 1.0)), 1.0);
+    }
+
     if (pc.params.x > 3.5) {
         // Sky dome. Unlit and unfogged: it is the thing the fog fades into, so
         // fogging it would wash the whole backdrop to a flat colour.

@@ -22,7 +22,7 @@ Playable vertical slice in progress.
 - [x] Synthesised audio: engine, tyres, passing cars, ambience, music
 - [x] Background scenery and a seeded sky
 - [ ] Ray-traced reflections
-- [ ] Weapons
+- [x] Weapons, traps and shields
 
 ## Building and running
 
@@ -46,6 +46,7 @@ cargo run --release -- --car car.glb   # use your own car model
 | Steer | A D / Left Right | Left stick |
 | Boost | Left Shift | A |
 | Handbrake | Space | B |
+| Fire the held weapon | Left Ctrl / Enter | X |
 | Respawn | R | Start |
 | Hand the car to the AI | P | - |
 | Orbit camera on/off | C | - |
@@ -149,6 +150,46 @@ unreachable from the machine this was written on, so the endpoint paths and
 JSON field names are unverified against the live service. They are all in one
 block at the top of `src/meshy.rs` for that reason. If a call returns 404 or
 complains about a missing field, that block is the only place to look.
+
+## Weapons
+
+Crates sit on the road roughly every 150 m. Driving through one arms you with a
+single item, and the slot is bottom centre of the HUD.
+
+| Item | What it does |
+| --- | --- |
+| **Rocket** | Fired forward. Leans toward whatever is ahead of it, and stays inside the tube |
+| **Mine** | Dropped behind. Arms after a second, then catches anyone - you included |
+| **Shield** | Absorbs the next hit and is spent doing so |
+| **Shock** | Reaches the car one place ahead of you in the running order, wherever it is |
+
+What you draw depends on where you are. The leader draws shields and mines; the
+back of the field draws rockets and shocks. That keeps a race close without
+taking a place off anyone who earned it.
+
+**A hit never ends a race.** It takes your engine for about a second and spins
+you, and that is all: you keep your wheels, your steering and your momentum.
+That is the same rule the handling already follows, where being upside down is
+survivable rather than fatal.
+
+Two things about the rocket that the tests pin down, because both were wrong
+first time round:
+
+- Its seeker steers *across* its path rather than accelerating at its target.
+  Pushing straight at a car that is nearly ahead puts almost all of the
+  acceleration into speed, which the speed clamp immediately takes back out;
+  measured against a car 14 m off the nose, pushing at the target closed 4 m of
+  that and turning across the path closed all 14.
+- It holds a standoff from the tube wall rather than bouncing off it. A rocket
+  flies straight while the track bends, so it meets the wall constantly, and
+  reflecting it there left it skimming the floor past its target.
+
+The AI uses all of it: opponents fire rockets at cars genuinely in front of
+them, drop mines when someone is close behind, raise shields when they have
+one, and shock whoever is ahead. With the whole field armed, a 90 second
+autopilot race drops from 409 to 350 km/h average and rises from 2% to 7% of
+the time inverted - which is the weapons working, and the first thing to tune
+if it turns out to be too much.
 
 ## Assets
 
@@ -267,6 +308,7 @@ they mean for this engine.
 | `src/scenery.rs` | Background props and the sky dome |
 | `src/plates.rs` | Generated and loaded background layers |
 | `src/marks.rs` | Skid marks |
+| `src/weapons.rs` | Pickups, rockets, mines, shields and shocks |
 | `src/meshy.rs` | Author-time model generation (optional feature) |
 | `src/gfx/` | Vulkan context, swapchain, buffers, renderer |
 | `src/shaders/` | WGSL, translated at pipeline build |

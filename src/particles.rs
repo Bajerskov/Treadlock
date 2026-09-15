@@ -224,6 +224,8 @@ pub mod slot {
     pub const PAD: usize = 3;
     pub const BRAKE: usize = 4;
     pub const BRAKE_GLOW: usize = 5;
+    pub const ROCKET: usize = 6;
+    pub const SHIELD: usize = 7;
 }
 
 impl Rng {

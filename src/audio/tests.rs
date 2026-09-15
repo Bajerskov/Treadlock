@@ -245,7 +245,18 @@ fn one_shots_finish_and_release_their_slots() {
     mixer.set_scene(Scene { rpm: 0.0, speed: 0.0, enclosure: 0.0, music: 0.0, ..Scene::default() });
     mixer.levels = Levels { engine: 0.0, ambient: 0.0, music: 0.0, ..Levels::default() };
 
-    for cue in [Cue::BoostPickup, Cue::Impact, Cue::Respawn, Cue::Suspension, Cue::PadCharge] {
+    for cue in [
+        Cue::BoostPickup,
+        Cue::Impact,
+        Cue::Respawn,
+        Cue::Suspension,
+        Cue::PadCharge,
+        Cue::WeaponPickup,
+        Cue::RocketLaunch,
+        Cue::Explosion,
+        Cue::ShieldUp,
+        Cue::ShieldBreak,
+    ] {
         mixer.fire(cue, 1.0);
         let mut during = vec![0.0f32; 2_400 * 2];
         mixer.render(&mut during, 2);

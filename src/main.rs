@@ -16,6 +16,7 @@ mod sim;
 mod track;
 mod ui;
 mod vehicle;
+mod weapons;
 
 use std::time::Instant;
 
@@ -215,6 +216,7 @@ fn run(args: Args) {
     }
 
     let mut garage = Garage::load(&mut ctx, &mut renderer, &args, &library);
+    let mut props = Props::load(&mut ctx);
     println!(
         "garage: {} car{} for {} drivers",
         garage.cars.len(),
@@ -314,6 +316,9 @@ fn run(args: Args) {
                             KeyCode::KeyD | KeyCode::ArrowRight => input.keys.right = pressed,
                             KeyCode::ShiftLeft => input.keys.boost = pressed,
                             KeyCode::Space => input.keys.handbrake = pressed,
+                            KeyCode::ControlLeft | KeyCode::Enter => {
+                                input.keys.fire = pressed
+                            }
                             KeyCode::KeyR if pressed => {
                                 sim.player.respawn(&sim.track);
                                 camera.snap(&sim.player, &sim.track);
@@ -398,6 +403,7 @@ fn run(args: Args) {
                         &sim,
                         &world,
                         &garage,
+                        &props,
                         camera.pos,
                     );
                     let (screen_w, screen_h) =
@@ -486,6 +492,7 @@ fn run(args: Args) {
                     sky_texture.destroy(&mut ctx);
                     font_texture.destroy(&mut ctx);
                     garage.destroy(&mut ctx);
+                    props.destroy(&mut ctx);
                     swapchain.destroy(&mut ctx);
                 }
             }
@@ -585,6 +592,36 @@ impl Car {
     }
 }
 
+/// The small meshes weapons are drawn with, uploaded once and reused for every
+/// crate, rocket and mine on the track.
+struct Props {
+    crate_box: GpuMesh,
+    rocket: GpuMesh,
+    mine: GpuMesh,
+}
+
+impl Props {
+    fn load(ctx: &mut Context) -> Props {
+        Props {
+            // All three are existing shapes at new sizes rather than new
+            // geometry: a tapered cube, a dart, and a short cylinder.
+            crate_box: GpuMesh::from_mesh(ctx, "crate", &mesh::chassis(Vec3::splat(1.3), 0.45)),
+            rocket: GpuMesh::from_mesh(
+                ctx,
+                "rocket",
+                &mesh::chassis(Vec3::new(0.3, 0.3, 1.1), 0.35),
+            ),
+            mine: GpuMesh::from_mesh(ctx, "mine", &mesh::wheel(1.7, 0.28, 12)),
+        }
+    }
+
+    fn destroy(&mut self, ctx: &mut Context) {
+        self.crate_box.destroy(ctx);
+        self.rocket.destroy(ctx);
+        self.mine.destroy(ctx);
+    }
+}
+
 /// The static half of the scene: uploaded once, drawn every frame, never moved.
 /// Bundled because five same-typed mesh references in an argument list is a
 /// swap waiting to happen.
@@ -600,6 +637,7 @@ fn build_draws<'a>(
     sim: &Sim,
     world: &World<'a>,
     garage: &'a Garage,
+    props: &'a Props,
     camera_pos: Vec3,
 ) -> Vec<Draw<'a>> {
     let mut draws = vec![
@@ -646,6 +684,65 @@ fn build_draws<'a>(
             texture: None,
         },
     ];
+
+    // Weapon props. Each is its own draw with a small shared mesh: a crate has
+    // to be able to wink out on its own when collected, which a single baked
+    // mesh could not do.
+    for pickup in &sim.weapons.pickups {
+        if pickup.cooldown > 0.0 {
+            continue;
+        }
+        // Turning slowly about the surface normal, which is how a pickup has
+        // read as collectable since before any of this was 3D.
+        let spin = Quat::from_axis_angle(pickup.up, sim.time * 1.6);
+        draws.push(Draw {
+            mesh: &props.crate_box,
+            model: Mat4::from_rotation_translation(spin, pickup.pos + pickup.up * 1.6),
+            tint: Vec3::new(0.35, 1.0, 0.75),
+            surface: 5.0,
+            emissive: pickup.frame as f32 * 0.1,
+            metallic: 0.5,
+            texture: None,
+        });
+    }
+
+    for rocket in &sim.weapons.rockets {
+        let heading = rocket.vel.normalize_or(Vec3::NEG_Z);
+        draws.push(Draw {
+            mesh: &props.rocket,
+            model: Mat4::from_rotation_translation(
+                track::look_rotation(heading, Vec3::Y),
+                rocket.pos,
+            ),
+            tint: Vec3::new(1.0, 0.55, 0.20),
+            surface: 5.0,
+            emissive: 0.0,
+            metallic: 0.8,
+            texture: None,
+        });
+    }
+
+    for mine in &sim.weapons.mines {
+        // Dark until it arms, then lit: a mine you cannot yet set off should
+        // not look like one you can.
+        let live = mine.arm <= 0.0;
+        draws.push(Draw {
+            mesh: &props.mine,
+            model: Mat4::from_rotation_translation(
+                track::look_rotation(mine.up, Vec3::Y),
+                mine.pos + mine.up * 0.3,
+            ),
+            tint: if live {
+                Vec3::new(1.0, 0.22, 0.22)
+            } else {
+                Vec3::new(0.30, 0.16, 0.16)
+            },
+            surface: 5.0,
+            emissive: if live { 0.0 } else { 40.0 },
+            metallic: 0.4,
+            texture: None,
+        });
+    }
 
     // Player first, then the field, each driver taking its own body from the
     // garage. A textured model carries its own colours, so its tint stays near

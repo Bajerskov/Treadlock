@@ -52,6 +52,7 @@ pub struct Sim {
     lap_start: f32,
     prev_distance: f32,
     accumulator: f32,
+    pub weapons: crate::weapons::Arsenal,
     /// Seconds spent travelling against the track. Accumulating time rather
     /// than testing an instant is what keeps a spin or a bad landing from
     /// flashing a warning at someone who is still going the right way.
@@ -88,6 +89,8 @@ impl Sim {
             })
             .collect();
 
+        let weapons = crate::weapons::Arsenal::new(&track, seed, OPPONENT_COUNT + 1);
+
         Sim {
             track,
             player,
@@ -101,6 +104,7 @@ impl Sim {
             prev_distance,
             accumulator: 0.0,
             wrong_way_timer: 0.0,
+            weapons,
         }
     }
 
@@ -140,6 +144,22 @@ impl Sim {
             opponent.progress += delta;
             opponent.prev_distance = opponent.car.distance;
             opponent.lap = (opponent.progress / self.track.length).floor().max(0.0) as u32;
+        }
+
+        // Weapons need every car at once, which means borrowing the player and
+        // the field together. Destructuring makes those disjoint borrows of
+        // separate fields rather than two of `self`.
+        {
+            let Sim { track, player, opponents, weapons, progress, .. } = self;
+            // Read the running order first: it borrows the field immutably,
+            // and that borrow has to end before the cars are taken mutably.
+            let standings: Vec<f32> = std::iter::once(*progress)
+                .chain(opponents.iter().map(|o| o.progress))
+                .collect();
+            let mut cars: Vec<&mut Vehicle> = std::iter::once(&mut *player)
+                .chain(opponents.iter_mut().map(|o| &mut o.car))
+                .collect();
+            weapons.update(track, &mut cars, &[controls.fire], &standings, dt);
         }
 
         self.resolve_car_contacts();
@@ -484,11 +504,25 @@ impl Sim {
         let surf = self.track.surface(self.player.pos, self.player.hint);
         let along = self.player.vel.dot(surf.tangent);
 
+        // A driver who has just been hit is spinning because they were shot,
+        // and they know it. Telling them to turn round on top of that is noise
+        // at exactly the moment they have least attention to spare.
+        if self.player.stun > 0.0 {
+            self.wrong_way_timer = (self.wrong_way_timer - dt * 2.5).max(0.0);
+            return;
+        }
+
         if along < -WRONG_WAY_SPEED {
             // Capped, or a long stint backwards banks time the warning then
             // takes just as long to spend, leaving it up well after the driver
             // has turned around.
             self.wrong_way_timer = (self.wrong_way_timer + dt).min(WRONG_WAY_DELAY + 0.3);
+        } else if along > WRONG_WAY_SPEED {
+            // Unambiguously going the right way, so drop it at once. The fade
+            // below is for the middle ground, where a car is slow or sideways
+            // and the answer is genuinely unclear; a driver who is plainly
+            // back on it should not still be reading a warning.
+            self.wrong_way_timer = 0.0;
         } else {
             // Clears faster than it builds, so turning round dismisses the
             // warning promptly rather than leaving it hanging.

@@ -23,6 +23,13 @@ sound  boost_pickup   sounds/boost_pickup.wav    rising sine arpeggio over a noi
 sound  boost_loop     sounds/boost_loop.wav      low square drone held for the duration of the boost
 sound  pad_charge     sounds/pad_charge.wav      quiet pulse from a boost pad, in earshot but not yet driven over
 
+# --- weapons -------------------------------------------------------------
+sound  weapon_pickup  sounds/weapon_pickup.wav   two rising synthesised notes
+sound  rocket_launch  sounds/rocket_launch.wav   noise swept upward by a resonant filter, so it reads as leaving
+sound  explosion      sounds/explosion.wav       synthesised crack, body and tail, scaled by the hit
+sound  shield_up      sounds/shield_up.wav       rising two-tone that settles, like something closing around the car
+sound  shield_break   sounds/shield_break.wav    the same shape inverted, with filtered noise over it
+
 # --- ambience -----------------------------------------------------------
 sound  wind_ambient   sounds/wind_ambient.wav    pink noise through a low-pass whose cutoff rides car speed
 sound  tunnel_tone    sounds/tunnel_tone.wav     resonant hum that fades in when the tube closes overhead

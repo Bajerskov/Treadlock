@@ -240,6 +240,11 @@ pub enum Cue {
     Respawn,
     Suspension,
     PadCharge,
+    WeaponPickup,
+    RocketLaunch,
+    Explosion,
+    ShieldUp,
+    ShieldBreak,
 }
 
 /// A fire-and-forget sound. Held in a fixed pool, so a pile-up cannot allocate
@@ -283,6 +288,11 @@ impl OneShot {
             Cue::Respawn => 0.90,
             Cue::Suspension => 0.12,
             Cue::PadCharge => 0.30,
+            Cue::WeaponPickup => 0.35,
+            Cue::RocketLaunch => 0.60,
+            Cue::Explosion => 0.70,
+            Cue::ShieldUp => 0.45,
+            Cue::ShieldBreak => 0.50,
         }
     }
 
@@ -330,6 +340,43 @@ impl OneShot {
             Cue::PadCharge => {
                 let env = (-t * 10.0).exp();
                 self.osc.sine(340.0, rate) * env * 0.25
+            }
+            // Two quick rising notes: collected, not fired.
+            Cue::WeaponPickup => {
+                let step = (t / 0.12).floor().min(1.0);
+                let env = (-(t % 0.12) * 22.0).exp() * (1.0 - t / 0.35).max(0.0);
+                self.osc.sine(680.0 * 2f32.powf(step * 5.0 / 12.0), rate) * env * 0.6
+            }
+            // Noise swept upward by a resonant filter, so it leaves rather than
+            // arrives. The pitch rising is what separates a launch from a hit.
+            Cue::RocketLaunch => {
+                let env = (1.0 - t / 0.6).max(0.0);
+                let sweep = 260.0 + 1800.0 * (t / 0.6);
+                let body = self.filter.process(self.noise.next(), sweep, rate);
+                let whistle = self.sweep.sine(sweep * 2.0, rate) * 0.25;
+                (body * 1.6 + whistle) * env * env
+            }
+            // A crack, a body and a tail, in that order. Any one alone reads as
+            // a click, a drum or a hiss.
+            Cue::Explosion => {
+                let env = (-t * 5.0).exp();
+                let crack = self.noise.next() * (-t * 40.0).exp();
+                let body = self.filter.process(self.noise.next(), 1400.0 - t * 1600.0, rate);
+                let thump = self.sweep.sine(120.0 - t * 110.0, rate);
+                (crack * 0.5 + body * 0.8 + thump * 0.9) * env * (0.4 + 0.6 * self.strength)
+            }
+            // Rising and settling: something closing around you.
+            Cue::ShieldUp => {
+                let env = (1.0 - t / 0.45).max(0.0);
+                let freq = 220.0 + 520.0 * (t / 0.45).min(1.0);
+                (self.osc.sine(freq, rate) * 0.5 + self.sweep.sine(freq * 1.5, rate) * 0.25) * env
+            }
+            // The same shape inverted, which is what makes it read as loss.
+            Cue::ShieldBreak => {
+                let env = (-t * 7.0).exp();
+                let freq = 740.0 - 560.0 * (t / 0.5).min(1.0);
+                let shatter = self.filter.process(self.noise.next(), 3000.0, rate) * 0.5;
+                (self.osc.sine(freq, rate) * 0.55 + shatter) * env
             }
         };
         out * gain * 0.8
