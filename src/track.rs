@@ -116,6 +116,13 @@ impl Rng {
     }
 }
 
+/// A seeded stream of numbers in 0..1, for the parts of the world that are
+/// generated alongside the track and should move with its seed.
+pub fn seed_rng(seed: u64) -> impl FnMut() -> f32 {
+    let mut rng = Rng::new(seed);
+    move || rng.next_f32()
+}
+
 fn catmull_rom(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: f32) -> Vec3 {
     let t2 = t * t;
     let t3 = t2 * t;
@@ -540,6 +547,16 @@ fn build_mesh(frames: &[Frame]) -> (Vec<Vertex>, Vec<u32>) {
         let next = (i + 1) % n;
         for s in 0..RING_SEGMENTS {
             let s_next = (s + 1) % RING_SEGMENTS;
+            // The open stretches are cut open. Their gravity already points at
+            // the world floor rather than at the tube wall, so the roof there
+            // is not a surface anyone drives on - it is only in the way of
+            // seeing where you are.
+            if [(i, s), (i, s_next), (next, s), (next, s_next)]
+                .iter()
+                .all(|&(f, seg)| faces_the_sky(&frames[f], seg))
+            {
+                continue;
+            }
             let a = (i * RING_SEGMENTS + s) as u32;
             let b = (i * RING_SEGMENTS + s_next) as u32;
             let c = (next * RING_SEGMENTS + s_next) as u32;
@@ -550,9 +567,94 @@ fn build_mesh(frames: &[Frame]) -> (Vec<Vertex>, Vec<u32>) {
     (vertices, indices)
 }
 
+/// Whether a ring segment is roof over an open stretch, and so should be left
+/// out of the mesh.
+///
+/// The physics is unchanged and still treats the tube as closed, which leaves
+/// a ceiling up there that can be hit but not seen. In practice nothing
+/// reaches it: these are exactly the stretches where gravity pulls the car to
+/// the world floor rather than round the wall.
+fn faces_the_sky(frame: &Frame, segment: usize) -> bool {
+    const OPEN_BELOW: f32 = 0.5;
+    const SKYWARD: f32 = 0.3;
+    if frame.gravity_blend >= OPEN_BELOW {
+        return false;
+    }
+    let a = segment as f32 / RING_SEGMENTS as f32 * std::f32::consts::TAU;
+    let radial = frame.normal * a.cos() + frame.binormal * a.sin();
+    radial.dot(Vec3::Y) > SKYWARD
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The open stretches have to be genuinely open, not merely differently
+    /// gravitied: this is what lets any of the scenery outside the tube be
+    /// seen, and what makes those sections read as open road rather than as
+    /// more pipe. Asked as the question that matters - can you see the sky from
+    /// down there? - by casting a ray at the mesh rather than by re-deriving
+    /// the rule the mesh was built with.
+    #[test]
+    fn open_stretches_are_open_to_the_sky_and_closed_ones_are_not() {
+        for seed in [1u64, 7, 42] {
+            let track = Track::generate(seed);
+            let mut checked_open = 0;
+            let mut checked_closed = 0;
+
+            for frame in track.frames.iter().step_by(9) {
+                // Straight down in world terms, flattened into the ring plane.
+                let floor = (Vec3::NEG_Y - frame.tangent * Vec3::NEG_Y.dot(frame.tangent))
+                    .normalize_or(Vec3::NEG_Y);
+                let from = frame.pos + floor * (frame.radius - 1.5);
+                let blocked = hits_mesh(&track, from, Vec3::Y);
+
+                if frame.gravity_blend < 0.2 {
+                    assert!(
+                        !blocked,
+                        "seed {seed}: an open stretch still has a roof over it"
+                    );
+                    checked_open += 1;
+                } else if frame.gravity_blend > 0.9 {
+                    assert!(
+                        blocked,
+                        "seed {seed}: an enclosed stretch has a hole in its roof"
+                    );
+                    checked_closed += 1;
+                }
+            }
+            assert!(checked_open > 0, "seed {seed}: the track has no open stretches at all");
+            assert!(checked_closed > 0, "seed {seed}: the track is open the whole way round");
+        }
+    }
+
+    /// Moller-Trumbore against every triangle. Slow, and exactly right, which
+    /// is the correct trade for a test.
+    fn hits_mesh(track: &Track, from: Vec3, dir: Vec3) -> bool {
+        track.indices.chunks(3).any(|tri| {
+            let p = |i: u32| Vec3::from_array(track.vertices[i as usize].pos);
+            let (a, b, c) = (p(tri[0]), p(tri[1]), p(tri[2]));
+            let e1 = b - a;
+            let e2 = c - a;
+            let h = dir.cross(e2);
+            let det = e1.dot(h);
+            if det.abs() < 1e-7 {
+                return false;
+            }
+            let inv = 1.0 / det;
+            let s = from - a;
+            let u = s.dot(h) * inv;
+            if !(0.0..=1.0).contains(&u) {
+                return false;
+            }
+            let q = s.cross(e1);
+            let v = dir.dot(q) * inv;
+            if v < 0.0 || u + v > 1.0 {
+                return false;
+            }
+            e2.dot(q) * inv > 1e-4
+        })
+    }
 
     #[test]
     fn look_rotation_is_a_proper_rotation() {

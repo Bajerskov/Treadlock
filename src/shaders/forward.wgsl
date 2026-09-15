@@ -99,6 +99,11 @@ fn road_pattern(uv: vec2<f32>, n: vec3<f32>) -> vec3<f32> {
     return glow;
 }
 
+// Hash for per-prop variation, fed from the vertex's spare slot.
+fn hash11(x: f32) -> f32 {
+    return fract(sin(x * 127.1 + 311.7) * 43758.5453);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
@@ -113,7 +118,41 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var albedo = pc.tint.rgb * sampled.rgb;
     var emissive = vec3<f32>(0.0);
 
+    if (pc.params.x > 3.5) {
+        // Sky dome. Unlit and unfogged: it is the thing the fog fades into, so
+        // fogging it would wash the whole backdrop to a flat colour.
+        return vec4<f32>(sampled.rgb * pc.tint.rgb, 1.0);
+    }
+
+    if (pc.params.x > 2.5) {
+        // Background structure. Lit flatly and faded hard into the fog, so the
+        // skyline reads as distance rather than competing with the track.
+        let seed = in.gravity_blend;
+        let tone = 0.35 + 0.30 * hash11(seed);
+        albedo = frame.fog.rgb * tone;
+
+        // Window lights, denser toward the base, on a grid that varies per
+        // structure. Only on the sides, which is where the uv.x band lands.
+        let grid = step(0.55, fract(in.uv.x * (7.0 + floor(hash11(seed + 3.0) * 9.0))))
+            * step(0.62, fract(in.uv.y * (13.0 + floor(hash11(seed + 9.0) * 14.0))));
+        let lit = step(0.45, hash11(seed + floor(in.uv.y * 20.0) + floor(in.uv.x * 20.0) * 31.0));
+        let warm = mix(vec3<f32>(1.0, 0.72, 0.35), vec3<f32>(0.4, 0.85, 1.0), hash11(seed + 5.0));
+        emissive += warm * grid * lit * 1.1;
+
+        // A hazard light at the top of the taller things, blinking out of step
+        // with its neighbours.
+        let beacon = step(0.96, in.uv.y) * step(0.5, fract(frame.sun.w * 0.6 + seed));
+        emissive += vec3<f32>(1.4, 0.2, 0.15) * beacon;
+
+        let ndl = dot(n, l) * 0.5 + 0.5;
+        var colour = albedo * (0.30 + 0.70 * ndl) + emissive;
+        // Denser fog than the track gets, so scenery sits behind it.
+        let fade = 1.0 - exp(-dist * frame.fog.a * 1.6);
+        return vec4<f32>(mix(colour, frame.fog.rgb, clamp(fade, 0.0, 1.0)), 1.0);
+    }
+
     if (pc.params.x > 1.5) {
+
         // Boost pad: chevrons racing forward along it, so it reads as a
         // direction to take rather than just a bright patch of floor.
         let travel = fract(in.uv.y * 3.0 - frame.sun.w * 2.5);

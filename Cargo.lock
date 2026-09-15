@@ -1721,6 +1721,7 @@ dependencies = [
  "glam",
  "gltf",
  "gpu-allocator",
+ "image",
  "libc",
  "naga",
  "raw-window-handle",

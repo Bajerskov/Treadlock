@@ -1,4 +1,8 @@
-# Treadlock
+
+| `src/assets.rs` | The manifest: what the game loads and what it does without |
+| `src/audio/` | Synthesis, mixing, WAV loading, cpal device |
+| `src/scenery.rs` | Background props and the sky dome |
+| `src/plates.rs` | Generated and loaded background layers |# Treadlock
 
 A fast arcade racer on procedurally generated tube tracks, where cars drive on
 the walls and the ceiling. Built in Rust on a custom Vulkan renderer, targeting
@@ -17,10 +21,12 @@ Playable vertical slice in progress.
 - [x] Fixed-timestep sim with lap timing
 - [x] Forward Vulkan renderer with chase camera
 - [x] Keyboard and gamepad input
-- [x] glTF/GLB car models
-- [ ] Model textures (geometry only for now)
+- [x] glTF/GLB car models, with textures
+- [x] Opponents, HUD, ranking and minimap
+- [x] Synthesised audio: engine, tyres, passing cars, ambience, music
+- [x] Background scenery and a seeded sky
 - [ ] Ray-traced reflections
-- [ ] Opponents, weapons, audio, HUD
+- [ ] Weapons
 
 ## Building and running
 
@@ -104,13 +110,74 @@ cargo run --release -- --check-model --car car.glb
 ```
 
 That reports triangle count, source and fitted dimensions, and whether a
-separate wheel mesh was found. Textures are not loaded yet, so models currently
-render with a flat tint.
+separate wheel mesh was found. A model's base colour map is loaded and used; a
+model without one renders with a flat tint.
 
 Note that the car spends time inverted, and the physics treats a flip as
 recoverable rather than fatal. A model with a strongly asymmetric silhouette
 will read oddly during those moments; symmetric, big-wheeled designs suit the
 game better.
+
+## Assets
+
+Everything the game will ever load is declared in `assets/manifest.txt`,
+whether or not the file exists. A missing asset is not an error: each line
+records what the game does instead, so the manifest doubles as a brief for
+whoever is making it.
+
+```sh
+cargo run --release -- --assets    # what is present, what is missing, and the fallback for each
+```
+
+Nothing is blocked waiting on art. Every sound is synthesised, the music is a
+generated bed, the skyline is generated geometry and the sky is a generated
+plate. Dropping a real file into `assets/` replaces exactly that one thing.
+
+| Kind | Format | Replaces |
+| --- | --- | --- |
+| `sound`, `music` | WAV (16/24-bit PCM or 32-bit float, mono or stereo) | The synthesised voice or the generated music bed |
+| `model` | `.glb` / `.gltf` | One generated prop shape, rescaled to the height the slot wanted |
+| `plate` | PNG or JPEG | One layer of the sky, resampled to the sky texture's size |
+
+## Audio
+
+Every sound is synthesised rather than sampled, which suits a game where the
+things making noise are continuous: the engine note follows road speed through
+an imaginary six-speed box, and a car going past is Doppler-shifted by its own
+closing speed rather than triggered as a "whoosh" when it gets near enough.
+
+Tones are summed from sine partials rather than clipped from a sawtooth. A
+naive saw at engine pitch folds its upper harmonics back down as aliasing,
+which is the metallic buzz that makes synthesised engines sound cheap.
+
+The mixer is pure. It turns a `Scene` - a snapshot of what is around the
+listener - into interleaved samples with no reference to a device or a clock,
+so the whole soundtrack can be rendered into a buffer and measured by tests on
+a machine with no sound card. The listener is the camera rather than the car,
+because that is where the player is: an opponent visibly overtaking on the left
+has to be on the left in the mix.
+
+Audio output is `cpal` behind the default `audio` feature. Build with
+`--no-default-features` on a machine without audio development headers; the
+game runs silent and everything else is unaffected.
+
+## The world outside the tube
+
+The track alternates between closed tube and open road. The open stretches are
+cut open in the mesh, not merely given different gravity, which is what gives
+those sections a sky and makes the scenery worth drawing.
+
+Scenery is generated from the track seed and baked into a single static mesh,
+so the whole skyline is one draw call. It stands only beside the open stretches
+and never intrudes into the tube. Note that the physics still treats the tube
+as closed, so there is a ceiling over the open sections that can be hit but not
+seen; in practice nothing reaches it, because those are exactly the stretches
+where gravity pulls the car to the floor.
+
+The sky is one texture composited from four layers - gradient, clouds, far
+ridge, near ridge - drawn in equirectangular space and mapped onto a dome
+carried on the camera. Each layer is generated from the seed unless the library
+has a file for it.
 
 ## How it works
 
@@ -163,5 +230,9 @@ they mean for this engine.
 | `src/input.rs` | Keyboard, and gamepads via Linux evdev |
 | `src/mesh.rs` | Runtime car meshes |
 | `src/model.rs` | glTF/GLB loading and refitting |
+| `src/assets.rs` | The manifest: what the game loads, and what it does without |
+| `src/audio/` | Synthesis, mixing, WAV loading, cpal device |
+| `src/scenery.rs` | Background props and the sky dome |
+| `src/plates.rs` | Generated and loaded background layers |
 | `src/gfx/` | Vulkan context, swapchain, buffers, renderer |
 | `src/shaders/` | WGSL, translated at pipeline build |

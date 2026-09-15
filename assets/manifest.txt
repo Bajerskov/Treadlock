@@ -9,7 +9,7 @@
 # kinds: sound  music  model  plate
 
 # --- vehicle ------------------------------------------------------------
-sound  engine_idle    sounds/engine_idle.wav     synthesised sawtooth drone, pitched by engine rpm
+sound  engine_idle    sounds/engine_idle.wav     synthesised harmonic stack, pitched by engine rpm
 sound  engine_drive   sounds/engine_drive.wav    synthesised harmonic stack, crossfaded in above quarter throttle
 sound  engine_boost   sounds/engine_boost.wav    the drive layer detuned upward with added noise
 sound  tyre_screech   sounds/tyre_screech.wav    band-passed noise, gain and centre frequency from tyre slip
@@ -29,9 +29,9 @@ sound  tunnel_tone    sounds/tunnel_tone.wav     resonant hum that fades in when
 sound  crowd_ambient  sounds/crowd_ambient.wav   silence; the crowd is only implied until this is recorded
 
 # --- music --------------------------------------------------------------
-music  music_menu     music/menu.ogg             silence at the menu
-music  music_race     music/race.ogg             silence during the race
-music  music_finish   music/finish.ogg           silence on the results screen
+music  music_menu     music/menu.wav             silence at the menu
+music  music_race     music/race.wav             a generated bed: seeded bass, arpeggio, kick and hat at 148 BPM
+music  music_finish   music/finish.wav           silence on the results screen
 
 # --- scenery models -----------------------------------------------------
 model  prop_pylon     models/pylon.glb           generated tapered box pylon

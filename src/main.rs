@@ -7,6 +7,8 @@ mod input;
 mod mesh;
 mod model;
 mod particles;
+mod plates;
+mod scenery;
 mod sim;
 mod track;
 mod ui;
@@ -217,6 +219,29 @@ fn run(args: Args) {
         )
     });
 
+    let library = assets::Library::load("assets");
+    let missing = library.missing().len();
+    if missing > 0 {
+        println!("assets: {missing} not present, using generated stand-ins (--assets to list)");
+    }
+
+    // The skyline and the sky behind it. Both are generated from the track seed
+    // when the library has no file for them, so the world outside the tube is
+    // never empty.
+    let scenery = scenery::generate(&sim.track, args.seed, &library);
+    println!("scenery: {} triangles", scenery.props.indices.len() / 3);
+    let mut prop_mesh = GpuMesh::from_mesh(&mut ctx, "scenery", &scenery.props);
+    let mut sky_mesh = GpuMesh::from_mesh(&mut ctx, "sky", &scenery.sky);
+    let sky_plate = plates::backdrop(&library, args.seed, 2048, 1024);
+    let mut sky_texture = gfx::texture::Texture::new(
+        &mut ctx,
+        renderer.texture_layout,
+        renderer.texture_pool,
+        sky_plate.width,
+        sky_plate.height,
+        &sky_plate.rgba,
+    );
+
     // The HUD font is rasterised from a table in code, so there is no asset to
     // load. Nearest filtering keeps the pixels crisp at any scale.
     let mut font_texture = gfx::texture::Texture::new_pixel_art(
@@ -240,11 +265,6 @@ fn run(args: Args) {
     let mut input = input::Input::new();
     println!("gamepads: {}", input.gamepad_count());
 
-    let library = assets::Library::load("assets");
-    let missing = library.missing().len();
-    if missing > 0 {
-        println!("assets: {missing} not present, using generated stand-ins (--assets to list)");
-    }
     let audio = audio::Audio::new(args.seed, &library);
     let mut cues = audio::Cues::new();
 
@@ -356,14 +376,21 @@ fn run(args: Args) {
                     let (right, up) = camera.basis();
                     let particle_vertices = particles.build_vertices(right, up).to_vec();
 
+                    let world = World {
+                        track: &track_mesh,
+                        pads: &pad_mesh,
+                        props: &prop_mesh,
+                        sky: &sky_mesh,
+                        sky_texture: &sky_texture,
+                    };
                     let draws = build_draws(
                         &sim,
-                        &track_mesh,
+                        &world,
                         &chassis_mesh,
                         &wheel_mesh,
-                        &pad_mesh,
                         car_texture.as_ref(),
                         show_wheels,
+                        camera.pos,
                     );
                     let (screen_w, screen_h) =
                         (swapchain.extent.width as f32, swapchain.extent.height as f32);
@@ -445,6 +472,9 @@ fn run(args: Args) {
                     renderer.destroy(&mut ctx);
                     track_mesh.destroy(&mut ctx);
                     pad_mesh.destroy(&mut ctx);
+                    prop_mesh.destroy(&mut ctx);
+                    sky_mesh.destroy(&mut ctx);
+                    sky_texture.destroy(&mut ctx);
                     font_texture.destroy(&mut ctx);
                     if let Some(texture) = car_texture.as_mut() {
                         texture.destroy(&mut ctx);
@@ -459,18 +489,51 @@ fn run(args: Args) {
         .expect("event loop failed");
 }
 
+/// The static half of the scene: uploaded once, drawn every frame, never moved.
+/// Bundled because five same-typed mesh references in an argument list is a
+/// swap waiting to happen.
+struct World<'a> {
+    track: &'a GpuMesh,
+    pads: &'a GpuMesh,
+    props: &'a GpuMesh,
+    sky: &'a GpuMesh,
+    sky_texture: &'a gfx::texture::Texture,
+}
+
 fn build_draws<'a>(
     sim: &Sim,
-    track_mesh: &'a GpuMesh,
+    world: &World<'a>,
     chassis_mesh: &'a GpuMesh,
     wheel_mesh: &'a GpuMesh,
-    pad_mesh: &'a GpuMesh,
     car_texture: Option<&'a gfx::texture::Texture>,
     show_wheels: bool,
+    camera_pos: Vec3,
 ) -> Vec<Draw<'a>> {
     let mut draws = vec![
+        // The sky first, and carried on the camera so it can never be reached.
+        // Its radius sits inside the far plane; drawn as real geometry rather
+        // than as a full-screen pass, because it is cheap either way and this
+        // needs no separate pipeline.
         Draw {
-            mesh: track_mesh,
+            mesh: world.sky,
+            model: Mat4::from_translation(camera_pos) * Mat4::from_scale(Vec3::splat(3000.0)),
+            tint: Vec3::ONE,
+            surface: 4.0,
+            emissive: 0.0,
+            metallic: 0.0,
+            texture: Some(world.sky_texture),
+        },
+        Draw {
+            mesh: world.props,
+            model: Mat4::IDENTITY,
+            tint: Vec3::ONE,
+            surface: 3.0,
+            emissive: 0.0,
+            metallic: 0.0,
+            texture: None,
+        },
+        Draw {
+            mesh: world.track,
             model: Mat4::IDENTITY,
             tint: Vec3::new(0.30, 0.33, 0.40),
             surface: 1.0,
@@ -481,7 +544,7 @@ fn build_draws<'a>(
         // Pads are their own mesh so they can glow without needing a per-vertex
         // material on the tube. surface = 2 selects the pad shading.
         Draw {
-            mesh: pad_mesh,
+            mesh: world.pads,
             model: Mat4::IDENTITY,
             tint: Vec3::new(0.10, 0.45, 0.75),
             surface: 2.0,
