@@ -1,4 +1,5 @@
 mod assets;
+mod audio;
 mod camera;
 mod effects;
 mod gfx;
@@ -239,6 +240,14 @@ fn run(args: Args) {
     let mut input = input::Input::new();
     println!("gamepads: {}", input.gamepad_count());
 
+    let library = assets::Library::load("assets");
+    let missing = library.missing().len();
+    if missing > 0 {
+        println!("assets: {missing} not present, using generated stand-ins (--assets to list)");
+    }
+    let audio = audio::Audio::new(args.seed, &library);
+    let mut cues = audio::Cues::new();
+
     // Orientation at the start line, so a report of "it looks upside down" can
     // be pinned on the engine or on the model rather than guessed at. All three
     // near +1.00 means the engine is upright and any remaining flip is baked
@@ -286,6 +295,7 @@ fn run(args: Args) {
                             KeyCode::KeyR if pressed => {
                                 sim.player.respawn(&sim.track);
                                 camera.snap(&sim.player, &sim.track);
+                                cues.respawned(&audio);
                             }
                             KeyCode::KeyP if pressed => {
                                 ai_driving = !ai_driving;
@@ -315,6 +325,7 @@ fn run(args: Args) {
                     if input.take_respawn() {
                         sim.player.respawn(&sim.track);
                         camera.snap(&sim.player, &sim.track);
+                        cues.respawned(&audio);
                     }
                     // Under AI the player car takes the same driver the
                     // opponents use, so what you are watching is the real
@@ -327,6 +338,8 @@ fn run(args: Args) {
                     };
                     sim.update(&controls, dt);
                     camera.update(&sim.player, &sim.track, dt);
+                    cues.poll(&sim, &audio, dt);
+                    audio.update(audio::observe(&sim, &camera, controls.throttle));
 
                     if renderer.needs_resize {
                         let size = window.inner_size();

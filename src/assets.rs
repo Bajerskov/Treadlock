@@ -102,6 +102,9 @@ impl Library {
         Library { root, entries, order }
     }
 
+    // The lookup the tests check the manifest with, and the accessor a caller
+    // needs to read an entry's fallback text.
+    #[allow(dead_code)]
     pub fn get(&self, id: &str) -> Option<&Entry> {
         self.entries.get(id)
     }
