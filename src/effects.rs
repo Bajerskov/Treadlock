@@ -10,7 +10,14 @@ use crate::particles::{slot, Emit, Particles};
 use crate::sim::Sim;
 
 /// Feed the particle system from this frame's simulation state.
-pub fn update(particles: &mut Particles, sim: &Sim, dt: f32, throttle: f32, boosting: bool) {
+pub fn update(
+    particles: &mut Particles,
+    sim: &Sim,
+    dt: f32,
+    throttle: f32,
+    brake: f32,
+    boosting: bool,
+) {
     let car = &sim.player;
     let speed = car.speed();
     let back = car.forward() * -1.0;
@@ -75,6 +82,50 @@ pub fn update(particles: &mut Particles, sim: &Sim, dt: f32, throttle: f32, boos
                 gravity: Vec3::NEG_Y * if spark { 14.0 } else { 0.0 },
             }
         });
+    }
+
+    // Braking. Two separate things, because they say different things: dust
+    // thrown forward off the contact patch, which reads as the car shedding
+    // speed, and the discs glowing, which reads as where that speed is going.
+    // Both are gated on actually moving, so holding the brake at a standstill
+    // does nothing.
+    if brake > 0.2 && speed > 8.0 {
+        let effort = brake * (speed / 80.0).clamp(0.25, 1.0);
+        let heading = car.vel.normalize_or_zero();
+        for wheel in &car.wheels {
+            if !wheel.contact {
+                continue;
+            }
+            let at = wheel.world_pos;
+            let surface_up = -sim.track.surface(at, car.hint).down;
+            particles.emit_rate(slot::BRAKE, 55.0 * effort, dt, |rng| Emit {
+                // Thrown forward of the wheel, where the road is arriving from.
+                pos: at + heading * rng.range(0.0, 1.2) + rng.direction() * 0.3,
+                vel: heading * rng.range(2.0, 7.0) * effort
+                    + surface_up * rng.range(0.5, 2.5)
+                    + rng.direction() * 1.5,
+                life: rng.range(0.25, 0.7),
+                size: rng.range(0.25, 0.6),
+                end_size: 1.8,
+                color: Vec3::new(0.55, 0.53, 0.50) * (0.6 + 0.6 * effort),
+                end_color: Vec3::new(0.10, 0.09, 0.09),
+                drag: 4.0,
+                gravity: Vec3::ZERO,
+            });
+
+            // The disc itself: a small hot point at the hub, not a plume.
+            particles.emit_rate(slot::BRAKE_GLOW, 26.0 * effort, dt, |rng| Emit {
+                pos: at + rng.direction() * 0.18,
+                vel: car.vel * 0.96,
+                life: rng.range(0.05, 0.12),
+                size: rng.range(0.18, 0.30),
+                end_size: 0.05,
+                color: Vec3::new(2.2, 0.55, 0.12) * effort,
+                end_color: Vec3::new(0.5, 0.08, 0.02),
+                drag: 0.0,
+                gravity: Vec3::ZERO,
+            });
+        }
     }
 
     // A pad firing gets one loud burst, so the moment of collection is legible

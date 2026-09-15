@@ -33,6 +33,16 @@ music  music_menu     music/menu.wav             silence at the menu
 music  music_race     music/race.wav             a generated bed: seeded bass, arpeggio, kick and hat at 148 BPM
 music  music_finish   music/finish.wav           silence on the results screen
 
+# --- cars -----------------------------------------------------------------
+# One per driver, cycled if fewer are supplied than there are drivers. Each
+# still gets its own livery tint, so a repeated body is not a repeated car.
+model  car_player     models/cars/player.glb     the built-in procedural body
+model  car_rival_a    models/cars/rival_a.glb    the built-in procedural body
+model  car_rival_b    models/cars/rival_b.glb    the built-in procedural body
+model  car_rival_c    models/cars/rival_c.glb    the built-in procedural body
+model  car_rival_d    models/cars/rival_d.glb    the built-in procedural body
+model  car_rival_e    models/cars/rival_e.glb    the built-in procedural body
+
 # --- scenery models -----------------------------------------------------
 model  prop_pylon     models/pylon.glb           generated tapered box pylon
 model  prop_arch      models/arch.glb            generated gateway arch swept over the track

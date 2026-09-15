@@ -4,6 +4,7 @@ mod camera;
 mod effects;
 mod gfx;
 mod input;
+mod marks;
 mod mesh;
 mod model;
 mod particles;
@@ -100,6 +101,7 @@ fn main() {
         for (name, source) in [
             ("forward.wgsl", include_str!("shaders/forward.wgsl")),
             ("particles.wgsl", include_str!("shaders/particles.wgsl")),
+            ("decal.wgsl", include_str!("shaders/decal.wgsl")),
             ("ui.wgsl", include_str!("shaders/ui.wgsl")),
         ] {
             let spirv = gfx::shader::compile(source);
@@ -178,52 +180,23 @@ fn run(args: Args) {
         &sim.track.vertices,
         &sim.track.indices,
     );
-    // A loaded model replaces the procedural body. If it has no separately
-    // named wheel node its wheels are already modelled into the body, so drawing
-    // the engine's own wheels on top would double them up.
-    let loaded = args.car.as_ref().and_then(|path| match model::Model::load(path, args.car_fit) {
-        Ok(m) => Some(m),
-        Err(e) => {
-            eprintln!("{e}\nfalling back to the procedural car");
-            None
-        }
-    });
-    let show_wheels = loaded.as_ref().map_or(true, |m| m.wheel.is_some());
-
-    let mut chassis_mesh = match &loaded {
-        Some(m) => GpuMesh::from_mesh(&mut ctx, "chassis", &m.chassis),
-        None => GpuMesh::from_mesh(
-            &mut ctx,
-            "chassis",
-            &mesh::chassis(vehicle::HALF_EXTENTS, 0.72),
-        ),
-    };
-    let mut wheel_mesh = match loaded.as_ref().and_then(|m| m.wheel.as_ref()) {
-        Some(w) => GpuMesh::from_mesh(&mut ctx, "wheel", w),
-        None => GpuMesh::from_mesh(&mut ctx, "wheel", &mesh::wheel(0.62, 0.22, 16)),
-    };
-
-    let (pad_vertices, pad_indices) = sim.track.boost_pad_mesh();
-    let mut pad_mesh = GpuMesh::upload(&mut ctx, "boost pads", &pad_vertices, &pad_indices);
-    println!("boost pads: {}", sim.track.boost_pads.len());
-
-    // Upload the model's base colour map, if it brought one.
-    let mut car_texture = loaded.as_ref().and_then(|m| m.base_color.as_ref()).map(|image| {
-        gfx::texture::Texture::new(
-            &mut ctx,
-            renderer.texture_layout,
-            renderer.texture_pool,
-            image.width,
-            image.height,
-            &image.rgba,
-        )
-    });
-
     let library = assets::Library::load("assets");
     let missing = library.missing().len();
     if missing > 0 {
         println!("assets: {missing} not present, using generated stand-ins (--assets to list)");
     }
+
+    let mut garage = Garage::load(&mut ctx, &mut renderer, &args, &library);
+    println!(
+        "garage: {} car{} for {} drivers",
+        garage.cars.len(),
+        if garage.cars.len() == 1 { "" } else { "s" },
+        sim.opponents.len() + 1
+    );
+
+    let (pad_vertices, pad_indices) = sim.track.boost_pad_mesh();
+    let mut pad_mesh = GpuMesh::upload(&mut ctx, "boost pads", &pad_vertices, &pad_indices);
+    println!("boost pads: {}", sim.track.boost_pads.len());
 
     // The skyline and the sky behind it. Both are generated from the track seed
     // when the library has no file for them, so the world outside the tube is
@@ -260,6 +233,7 @@ fn run(args: Args) {
     let mut last_cursor: Option<glam::Vec2> = None;
 
     let mut particles = particles::Particles::new();
+    let mut skid = marks::Marks::new();
     let mut camera = Camera::new(&sim.player);
     camera.snap(&sim.player, &sim.track);
     let mut input = input::Input::new();
@@ -372,9 +346,18 @@ fn run(args: Args) {
                     let aspect =
                         swapchain.extent.width as f32 / swapchain.extent.height.max(1) as f32;
                     let controls = input.controls();
-                    effects::update(&mut particles, &sim, dt, controls.throttle, controls.boost);
+                    effects::update(
+                        &mut particles,
+                        &sim,
+                        dt,
+                        controls.throttle,
+                        controls.brake,
+                        controls.boost,
+                    );
+                    skid.update(&sim, dt);
                     let (right, up) = camera.basis();
                     let particle_vertices = particles.build_vertices(right, up).to_vec();
+                    let mark_vertices = skid.build_vertices().to_vec();
 
                     let world = World {
                         track: &track_mesh,
@@ -386,10 +369,7 @@ fn run(args: Args) {
                     let draws = build_draws(
                         &sim,
                         &world,
-                        &chassis_mesh,
-                        &wheel_mesh,
-                        car_texture.as_ref(),
-                        show_wheels,
+                        &garage,
                         camera.pos,
                     );
                     let (screen_w, screen_h) =
@@ -417,6 +397,7 @@ fn run(args: Args) {
                         sim.time,
                         &draws,
                         &particle_vertices,
+                        &mark_vertices,
                         &hud.vertices,
                         Some(&font_texture),
                     );
@@ -476,17 +457,104 @@ fn run(args: Args) {
                     sky_mesh.destroy(&mut ctx);
                     sky_texture.destroy(&mut ctx);
                     font_texture.destroy(&mut ctx);
-                    if let Some(texture) = car_texture.as_mut() {
-                        texture.destroy(&mut ctx);
-                    }
-                    chassis_mesh.destroy(&mut ctx);
-                    wheel_mesh.destroy(&mut ctx);
+                    garage.destroy(&mut ctx);
                     swapchain.destroy(&mut ctx);
                 }
             }
             _ => {}
         })
         .expect("event loop failed");
+}
+
+/// One body in the field: its meshes and its livery map.
+struct Car {
+    chassis: GpuMesh,
+    wheel: GpuMesh,
+    texture: Option<gfx::texture::Texture>,
+    /// False when the model already has wheels modelled into the body, where
+    /// drawing the engine's own on top would double them up.
+    show_wheels: bool,
+}
+
+/// Every car available to the field.
+///
+/// Drivers are assigned one each and cycle if there are fewer bodies than
+/// drivers. A repeated body is not a repeated car: the livery tint is per
+/// driver, so the field still reads as six competitors rather than six clones.
+struct Garage {
+    cars: Vec<Car>,
+}
+
+impl Garage {
+    fn load(ctx: &mut Context, renderer: &mut Renderer, args: &Args, library: &assets::Library) -> Garage {
+        let mut cars = Vec::new();
+
+        // `--car` is the player's, and comes first so it is always driver 0.
+        let paths: Vec<(String, model::Fit)> = args
+            .car
+            .iter()
+            .map(|p| (p.clone(), args.car_fit))
+            .chain(
+                ["car_player", "car_rival_a", "car_rival_b", "car_rival_c", "car_rival_d", "car_rival_e"]
+                    .iter()
+                    .filter(|id| !(args.car.is_some() && **id == "car_player"))
+                    .filter_map(|id| Some((library.path(id)?.to_str()?.to_string(), model::Fit::default()))),
+            )
+            .collect();
+
+        for (path, fit) in paths {
+            match model::Model::load(&path, fit) {
+                Ok(m) => cars.push(Car::upload(ctx, renderer, Some(m))),
+                Err(e) => eprintln!("{e}\nskipping that car"),
+            }
+        }
+
+        // The procedural body is the floor, not a special case: with no models
+        // at all the field is still a field.
+        if cars.is_empty() {
+            cars.push(Car::upload(ctx, renderer, None));
+        }
+        Garage { cars }
+    }
+
+    fn for_driver(&self, index: usize) -> &Car {
+        &self.cars[index % self.cars.len()]
+    }
+
+    fn destroy(&mut self, ctx: &mut Context) {
+        for car in &mut self.cars {
+            car.chassis.destroy(ctx);
+            car.wheel.destroy(ctx);
+            if let Some(texture) = car.texture.as_mut() {
+                texture.destroy(ctx);
+            }
+        }
+    }
+}
+
+impl Car {
+    fn upload(ctx: &mut Context, renderer: &mut Renderer, loaded: Option<model::Model>) -> Car {
+        let show_wheels = loaded.as_ref().map_or(true, |m| m.wheel.is_some());
+        let chassis = match &loaded {
+            Some(m) => GpuMesh::from_mesh(ctx, "chassis", &m.chassis),
+            None => GpuMesh::from_mesh(ctx, "chassis", &mesh::chassis(vehicle::HALF_EXTENTS, 0.72)),
+        };
+        let wheel = match loaded.as_ref().and_then(|m| m.wheel.as_ref()) {
+            Some(w) => GpuMesh::from_mesh(ctx, "wheel", w),
+            None => GpuMesh::from_mesh(ctx, "wheel", &mesh::wheel(0.62, 0.22, 16)),
+        };
+        let texture = loaded.as_ref().and_then(|m| m.base_color.as_ref()).map(|image| {
+            gfx::texture::Texture::new(
+                ctx,
+                renderer.texture_layout,
+                renderer.texture_pool,
+                image.width,
+                image.height,
+                &image.rgba,
+            )
+        });
+        Car { chassis, wheel, texture, show_wheels }
+    }
 }
 
 /// The static half of the scene: uploaded once, drawn every frame, never moved.
@@ -503,10 +571,7 @@ struct World<'a> {
 fn build_draws<'a>(
     sim: &Sim,
     world: &World<'a>,
-    chassis_mesh: &'a GpuMesh,
-    wheel_mesh: &'a GpuMesh,
-    car_texture: Option<&'a gfx::texture::Texture>,
-    show_wheels: bool,
+    garage: &'a Garage,
     camera_pos: Vec3,
 ) -> Vec<Draw<'a>> {
     let mut draws = vec![
@@ -554,27 +619,32 @@ fn build_draws<'a>(
         },
     ];
 
-    // Player first, then the field. A textured model carries its own colours,
-    // so its tint stays near white and the livery comes from the map; the
-    // procedural body has no map and is coloured by the tint alone.
-    let livery = |base: Vec3| if car_texture.is_some() { Vec3::splat(0.9) * base * 1.6 } else { base };
-
+    // Player first, then the field, each driver taking its own body from the
+    // garage. A textured model carries its own colours, so its tint stays near
+    // white and the livery comes from the map; the procedural body has no map
+    // and is coloured by the tint alone.
     let cars = std::iter::once((&sim.player, Vec3::new(0.85, 0.16, 0.10)))
         .chain(sim.opponents.iter().map(|o| (&o.car, o.tint)));
 
-    for (car, colour) in cars {
+    for (driver, (car, colour)) in cars.enumerate() {
+        let body = garage.for_driver(driver);
+        let tint = if body.texture.is_some() {
+            Vec3::splat(0.9) * colour * 1.6
+        } else {
+            colour
+        };
         let boosting = car.pad_boost > 0.0 || car.boost < 0.999;
         draws.push(Draw {
-            mesh: chassis_mesh,
+            mesh: &body.chassis,
             model: Mat4::from_rotation_translation(car.rot, car.pos),
-            tint: livery(colour),
+            tint,
             surface: 0.0,
             emissive: if boosting { 0.6 } else { 0.0 },
             metallic: 0.85,
-            texture: car_texture,
+            texture: body.texture.as_ref(),
         });
 
-        if !show_wheels {
+        if !body.show_wheels {
             continue;
         }
         for wheel in &car.wheels {
@@ -582,13 +652,13 @@ fn build_draws<'a>(
             // about their axle for the visual.
             let spin = Quat::from_rotation_x(wheel.spin_angle);
             draws.push(Draw {
-                mesh: wheel_mesh,
+                mesh: &body.wheel,
                 model: Mat4::from_rotation_translation(car.rot * spin, wheel.world_pos),
                 tint: Vec3::new(0.09, 0.09, 0.11),
                 surface: 0.0,
                 emissive: 0.0,
                 metallic: 0.2,
-                texture: car_texture,
+                texture: body.texture.as_ref(),
             });
         }
     }

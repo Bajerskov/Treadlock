@@ -11,12 +11,18 @@ use super::swapchain::{color_range, Swapchain, DEPTH_FORMAT};
 use super::texture::Texture;
 use crate::mesh::Mesh;
 use crate::particles::{ParticleVertex, Particles, MAX_PARTICLES};
+use crate::marks;
 use crate::track::Vertex;
 use crate::ui::UiVertex;
 
 /// Frames recorded ahead of the GPU. Two keeps latency low, which matters more
 /// than throughput for a twitchy racer.
 const FRAMES_IN_FLIGHT: usize = 2;
+
+// Skid marks are drawn with the particle quad index buffer rather than one of
+// their own. Growing either pool past the other would silently draw only part
+// of the larger one, so it is a build error instead.
+const _: () = assert!(marks::MAX_MARKS <= MAX_PARTICLES);
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -70,6 +76,7 @@ struct Frame {
     /// Rebuilt every frame, so both are host visible.
     ui_vertices: Buffer,
     particle_vertices: Buffer,
+    mark_vertices: Buffer,
 }
 
 /// One object to draw this frame.
@@ -95,8 +102,11 @@ pub struct Renderer {
     pub texture_pool: vk::DescriptorPool,
     white: Option<Texture>,
     particle_pipeline: vk::Pipeline,
+    decal_pipeline: vk::Pipeline,
     ui_pipeline: vk::Pipeline,
-    /// Quad indices for the whole pool, uploaded once and reused.
+    /// Quad indices for the whole pool, uploaded once and reused. Skid marks
+    /// are quads too and share it, which only works while the two pools are the
+    /// same size.
     particle_indices: Buffer,
     frames: Vec<Frame>,
     frame_index: usize,
@@ -244,6 +254,14 @@ impl Renderer {
                     MemoryLocation::CpuToGpu,
                 );
 
+                let mark_vertices = Buffer::new(
+                    ctx,
+                    "skid mark vertices",
+                    (marks::MAX_MARKS * 4 * std::mem::size_of::<ParticleVertex>()) as vk::DeviceSize,
+                    vk::BufferUsageFlags::VERTEX_BUFFER,
+                    MemoryLocation::CpuToGpu,
+                );
+
                 // Generous: the HUD is a few hundred quads, the minimap most of
                 // them, and overrunning would silently truncate the overlay.
                 let ui_vertices = Buffer::new(
@@ -258,6 +276,7 @@ impl Renderer {
                     command_buffer: command_buffers[i],
                     ui_vertices,
                     particle_vertices,
+                    mark_vertices,
                     image_available: ctx
                         .device
                         .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
@@ -292,6 +311,7 @@ impl Renderer {
                 texture_pool,
                 white: Some(white),
                 particle_pipeline: build_particle_pipeline(ctx, swapchain, pipeline_layout),
+                decal_pipeline: build_decal_pipeline(ctx, swapchain, pipeline_layout),
                 ui_pipeline: build_ui_pipeline(ctx, swapchain, pipeline_layout),
                 particle_indices,
                 pipeline_layout,
@@ -314,6 +334,7 @@ impl Renderer {
         time: f32,
         draws: &[Draw],
         particle_vertices: &[ParticleVertex],
+        mark_vertices: &[ParticleVertex],
         ui_vertices: &[UiVertex],
         font: Option<&Texture>,
     ) {
@@ -463,6 +484,46 @@ impl Renderer {
                 ctx.device.cmd_draw_indexed(cmd, d.mesh.count, 1, 0, 0, 0);
             }
 
+            // Skid marks after the solid world and before the particles: they
+            // darken the road, so they need the road already drawn, and smoke
+            // drifting over a skid should light it rather than the other way
+            // round.
+            if !mark_vertices.is_empty() {
+                let quads = (mark_vertices.len() / 4).min(marks::MAX_MARKS);
+                frame
+                    .mark_vertices
+                    .write(bytemuck::cast_slice(&mark_vertices[..quads * 4]));
+
+                ctx.device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.decal_pipeline,
+                );
+                let push = Push {
+                    model: Mat4::IDENTITY,
+                    tint: Vec4::ONE,
+                    params: Vec4::ZERO,
+                };
+                ctx.device.cmd_push_constants(
+                    cmd,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    bytemuck::bytes_of(&push),
+                );
+                ctx.device
+                    .cmd_bind_vertex_buffers(cmd, 0, &[frame.mark_vertices.handle], &[0]);
+                // Marks are quads like particles, so they share that index
+                // buffer rather than duplicating it.
+                ctx.device.cmd_bind_index_buffer(
+                    cmd,
+                    self.particle_indices.handle,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                ctx.device.cmd_draw_indexed(cmd, quads as u32 * 6, 1, 0, 0, 0);
+            }
+
             // Particles last, so they blend over finished geometry.
             if !particle_vertices.is_empty() {
                 let quads = (particle_vertices.len() / 4).min(MAX_PARTICLES);
@@ -594,15 +655,17 @@ impl Renderer {
     pub fn rebuild_pipeline(&mut self, ctx: &mut Context, swapchain: &Swapchain) {
         unsafe {
             ctx.device.device_wait_idle().ok();
-            // Both pipelines bake in the colour format, so both are rebuilt.
-            // The index buffer does not, and must survive.
+            // Every pipeline bakes in the colour format, so every one is
+            // rebuilt. The index buffer does not, and must survive.
             ctx.device.destroy_pipeline(self.pipeline, None);
             ctx.device.destroy_pipeline(self.particle_pipeline, None);
-            self.pipeline = build_pipeline(ctx, swapchain, self.pipeline_layout);
+            ctx.device.destroy_pipeline(self.decal_pipeline, None);
             ctx.device.destroy_pipeline(self.ui_pipeline, None);
+            self.pipeline = build_pipeline(ctx, swapchain, self.pipeline_layout);
             self.ui_pipeline = build_ui_pipeline(ctx, swapchain, self.pipeline_layout);
             self.particle_pipeline =
                 build_particle_pipeline(ctx, swapchain, self.pipeline_layout);
+            self.decal_pipeline = build_decal_pipeline(ctx, swapchain, self.pipeline_layout);
         }
     }
 
@@ -615,6 +678,7 @@ impl Renderer {
                 ctx.device.destroy_fence(frame.in_flight, None);
                 frame.uniform.destroy(ctx);
                 frame.particle_vertices.destroy(ctx);
+                frame.mark_vertices.destroy(ctx);
                 frame.ui_vertices.destroy(ctx);
             }
             self.frames.clear();
@@ -629,6 +693,8 @@ impl Renderer {
                 .destroy_descriptor_set_layout(self.texture_layout, None);
             ctx.device.destroy_pipeline(self.pipeline, None);
             ctx.device.destroy_pipeline(self.particle_pipeline, None);
+            ctx.device.destroy_pipeline(self.decal_pipeline, None);
+            ctx.device.destroy_pipeline(self.ui_pipeline, None);
             self.particle_indices.destroy(ctx);
             ctx.device.destroy_pipeline_layout(self.pipeline_layout, None);
         }
@@ -964,3 +1030,109 @@ unsafe fn transition(
         .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&barrier));
 }
 
+unsafe fn build_decal_pipeline(
+    ctx: &Context,
+    swapchain: &Swapchain,
+    layout: vk::PipelineLayout,
+) -> vk::Pipeline {
+    let spirv = shader::compile(include_str!("../shaders/decal.wgsl"));
+    let module = shader::module(ctx, &spirv);
+    let vs_name = c"vs_main";
+    let fs_name = c"fs_main";
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(vs_name),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(module)
+            .name(fs_name),
+    ];
+
+    let bindings = [vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(std::mem::size_of::<ParticleVertex>() as u32)
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let attributes = [
+        vk::VertexInputAttributeDescription::default()
+            .location(0)
+            .binding(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(0),
+        vk::VertexInputAttributeDescription::default()
+            .location(1)
+            .binding(0)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .offset(12),
+        vk::VertexInputAttributeDescription::default()
+            .location(2)
+            .binding(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(28),
+    ];
+
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&bindings)
+        .vertex_attribute_descriptions(&attributes);
+    let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let raster = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    // Tested against the scene so a mark is hidden by anything in front of it,
+    // but not written, because a mark lies on the road rather than occluding
+    // it and several may overlap in any order.
+    let depth = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_write_enable(false)
+        .depth_compare_op(vk::CompareOp::LESS);
+    // Multiply: result = destination * source. Rubber darkens what is under it
+    // rather than covering it, so the track's own markings stay visible through
+    // a skid, and a mark that has faded to white leaves the road untouched.
+    let blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::ZERO)
+        .dst_color_blend_factor(vk::BlendFactor::SRC_COLOR)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ZERO)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+        .alpha_blend_op(vk::BlendOp::ADD)];
+
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let color_formats = [swapchain.format];
+    let mut rendering = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&color_formats)
+        .depth_attachment_format(DEPTH_FORMAT);
+
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&assembly)
+        .viewport_state(&viewport)
+        .rasterization_state(&raster)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering);
+
+    let pipeline = ctx
+        .device
+        .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+        .expect("create decal pipeline")[0];
+    ctx.device.destroy_shader_module(module, None);
+    pipeline
+}
